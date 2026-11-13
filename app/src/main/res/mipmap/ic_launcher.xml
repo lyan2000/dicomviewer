@@ -1,0 +1,11 @@
+<!-- Pre-API 26 launcher icon (adaptive icon in mipmap-anydpi-v26 is used on 26+). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:fillColor="#FF102A43" android:pathData="M54,6a48,48 0,1 1,0 96a48,48 0,1 1,0 -96z" />
+    <path android:fillColor="#66FFFFFF" android:pathData="M44,34h30v30h-30z" />
+    <path android:fillColor="#AAFFFFFF" android:pathData="M39,39h30v30h-30z" />
+    <path android:fillColor="#FFFFFFFF" android:pathData="M34,44h30v30h-30z" />
+</vector>
