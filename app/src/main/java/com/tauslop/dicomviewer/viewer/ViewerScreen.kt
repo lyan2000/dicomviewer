@@ -60,6 +60,7 @@ class ViewerActions(
     val onCancelScan: () -> Unit,
     val onViewSize: (IntSize) -> Unit,
     val onSwap: (MprView) -> Unit,
+    val onSwap3D: () -> Unit,
     val onTapImage: (Float, Float) -> Unit,
     val onTwist: (Float) -> Unit,
     val onResetPlanes: () -> Unit,
@@ -205,7 +206,8 @@ fun ViewerScreen(state: ViewerState, actions: ViewerActions) {
  */
 @Composable
 private fun ToolRow(state: ViewerState, actions: ViewerActions) {
-    val tools = listOf(Tool.PAN, Tool.ZOOM, Tool.WL) + if (state.mpr != null) listOf(Tool.OBLIQUE) else emptyList()
+    val tools = listOf(Tool.PAN, Tool.ZOOM, Tool.WL) +
+        if (state.mpr != null && !state.mpr.threeDMain) listOf(Tool.OBLIQUE) else emptyList()
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 12.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),

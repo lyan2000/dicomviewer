@@ -27,6 +27,9 @@ import com.tauslop.dicomviewer.data.SliceCache
 import com.tauslop.dicomviewer.io.FolderScanner
 import com.tauslop.dicomviewer.mpr.MprSession
 import com.tauslop.dicomviewer.render.FrameRenderer
+import com.tauslop.dicomviewer.vr.VolumeRenderer
+import com.tauslop.dicom.vr.OrbitCamera
+import com.tauslop.dicom.vr.TransferFunction
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -88,7 +91,13 @@ data class MprUi(
     val small: List<SmallView>,
     /** Planes are rotated away from standard axial/coronal/sagittal. */
     val oblique: Boolean,
+    /** The 3D view occupies the main square (small row then shows all three planes). */
+    val threeDMain: Boolean,
+    val vr: VrUi,
 )
+
+/** 3D view: latest rendered image and a status label (preset, render time, or progress). */
+data class VrUi(val image: ImageBitmap?, val label: String)
 
 data class SmallView(val view: MprView, val label: String, val image: ImageBitmap?, val lines: List<RefLine>)
 
@@ -133,6 +142,18 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
     /** One renderer per view: each keeps a pixel buffer sized to its plane. */
     private val viewRenderers = MprView.entries.associateWith { FrameRenderer() }
 
+    // ---- 3D (volume rendering) state ----
+    private val vrRenderer = VolumeRenderer()
+    private var vrCamera: OrbitCamera? = null
+    private var vrTf: TransferFunction = TransferFunction.BONE
+    private var vrReady = false
+    private var vrStatus = "3D"
+    private var vrImage: ImageBitmap? = null
+    private var threeDMain = false
+    private var vrJob: Job? = null
+    private data class VrReq(val camera: OrbitCamera, val tf: TransferFunction, val w: Int, val h: Int, val generation: Int)
+    private val vrRequest = MutableStateFlow<VrReq?>(null)
+
     private sealed interface Req { val generation: Int }
     /** Stack mode: draw slice [index]. */
     private data class StackReq(val seriesIndex: Int, val index: Int, val window: Window?, override val generation: Int) : Req
@@ -158,6 +179,10 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
                     is MprReq -> renderMpr(r)
                 }
             }
+        }
+        // 3D renders run on the GL thread via their own conflated flow, so they never block MPR.
+        viewModelScope.launch {
+            vrRequest.filterNotNull().collect { renderVr(it) }
         }
         restoreSession()
     }
@@ -247,6 +272,11 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         mpr = null
         smallImages.clear()
         viewLines.clear()
+        vrJob?.cancel()
+        threeDMain = false
+        vrReady = false
+        vrImage = null
+        vrCamera = null
         fileWindowIndex = 0
         val start = startSlice.coerceIn(0, s.size - 1)
         _state.update {
@@ -306,6 +336,7 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
                         presetNames = Presets.labelsFor(s.modality, first.fileWindows.isNotEmpty()))
                 }
                 requestMpr()
+                startVr(vol, gen)
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 // Fall back to the plain stack viewer.
@@ -321,6 +352,7 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Jump to slice [index] (clamped) of the main view. */
     fun showSlice(index: Int) {
+        if (threeDMain) return
         val m = mpr
         if (m != null) {
             m.goTo(m.main, index)
@@ -337,19 +369,32 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Move [steps] slices from the current target. */
     fun scrollBy(steps: Int) {
-        if (steps == 0) return
+        if (steps == 0 || threeDMain) return
         val m = mpr
         if (m != null) { m.scroll(m.main, steps); markInteracting(); requestMpr() }
         else showSlice(_state.value.targetIndex + steps)
     }
 
-    /** Swap a small view into the main slot. */
+    /** Swap a small MPR view into the main slot (also leaves 3D-main). */
     fun swapMain(view: MprView) {
         val m = mpr ?: return
-        if (m.main == view) return
+        if (m.main == view && !threeDMain) return
+        val leaving3d = threeDMain
+        threeDMain = false
         m.main = view
+        if (leaving3d) vrImage = null // tile re-renders at tile size
         _state.update { it.copy(zoom = 1f, pan = Offset.Zero, image = smallImages[view] ?: it.image, mpr = mprUi(m)) }
         requestMpr()
+        if (leaving3d) requestVr()
+    }
+
+    /** Put the 3D view in the main square. */
+    fun swapTo3D() {
+        val m = mpr ?: return
+        if (threeDMain) return
+        threeDMain = true
+        _state.update { it.copy(zoom = 1f, pan = Offset.Zero, mpr = mprUi(m)) }
+        requestVr()
     }
 
     fun setTransform(zoom: Float, pan: Offset) {
@@ -458,11 +503,72 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun mprUi(m: MprSession) = MprUi(
         main = m.main,
-        mainLabel = m.label(m.main),
+        mainLabel = if (threeDMain) "3D" else m.label(m.main),
         mainLines = viewLines[m.main].orEmpty(),
-        small = m.smallViews.map { SmallView(it, m.label(it), smallImages[it], viewLines[it].orEmpty()) },
+        // With 3D in the main square, all three planes go in the small row.
+        small = (if (threeDMain) MprView.entries else m.smallViews)
+            .map { SmallView(it, m.label(it), smallImages[it], viewLines[it].orEmpty()) },
         oblique = !m.rotation.isIdentity,
+        threeDMain = threeDMain,
+        vr = VrUi(vrImage, vrStatus),
     )
+
+    private fun publishMpr() {
+        val m = mpr ?: return
+        _state.update { it.copy(mpr = mprUi(m)) }
+    }
+
+    // ---- 3D rendering ------------------------------------------------------
+
+    /** Creates the GL context (once), uploads [vol] as a 3D texture, then renders the first frame. */
+    private fun startVr(vol: com.tauslop.dicom.Volume, gen: Int) {
+        vrJob?.cancel()
+        vrReady = false
+        vrImage = null
+        vrStatus = "3D: preparing…"
+        publishMpr()
+        vrJob = viewModelScope.launch {
+            try {
+                vrRenderer.init()
+                vrRenderer.upload(vol) { p ->
+                    vrStatus = "3D: uploading ${(p * 100).toInt()}%"
+                    viewModelScope.launch { if (gen == generation) publishMpr() }
+                }
+                if (gen != generation) return@launch
+                vrCamera = OrbitCamera.forVolume(vol)
+                vrReady = true
+                vrStatus = "3D · ${vrTf.name}"
+                publishMpr()
+                requestVr()
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                vrStatus = "3D unavailable: ${e.message ?: e.javaClass.simpleName}"
+                publishMpr()
+            }
+        }
+    }
+
+    /** Main square: up to 720 px (from the measured view size); small tile: 384 px. */
+    private fun requestVr() {
+        val cam = vrCamera ?: return
+        if (!vrReady) return
+        val side = if (threeDMain) viewSize.width.coerceIn(256, 720).takeIf { viewSize.width > 0 } ?: 512 else 384
+        vrRequest.value = VrReq(cam, vrTf, side, side, generation)
+    }
+
+    private suspend fun renderVr(r: VrReq) {
+        try {
+            val f = vrRenderer.render(r.camera, r.tf, r.w, r.h, stepMm = 1.0)
+            if (r.generation != generation) return
+            vrImage = f.bitmap.asImageBitmap()
+            vrStatus = "3D · ${r.tf.name} · ${f.millis} ms"
+            publishMpr()
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            vrStatus = "3D error: ${e.message ?: e.javaClass.simpleName}"
+            publishMpr()
+        }
+    }
 
     /**
      * Two-finger twist on the main view: rotate all planes about the main view's normal, through
@@ -510,6 +616,7 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Single tap on the main image at pixel ([u], [v]): move the cursor there (depth unchanged). */
     fun tapAt(u: Float, v: Float) {
+        if (threeDMain) return
         val m = mpr ?: return
         val plane = m.plane(m.main)
         if (u < 0 || v < 0 || u > plane.width - 1 || v > plane.height - 1) return
@@ -588,6 +695,11 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         cache.close()
+        // viewModelScope is already cancelled here; free GL resources on their own thread.
+        kotlinx.coroutines.CoroutineScope(Dispatchers.Default).launch {
+            runCatching { vrRenderer.release() }
+            vrRenderer.shutdown()
+        }
     }
 
     private fun summary(s: Series<Uri>): SeriesSummary {

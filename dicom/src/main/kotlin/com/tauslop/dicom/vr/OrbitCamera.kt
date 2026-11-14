@@ -1,0 +1,90 @@
+package com.tauslop.dicom.vr
+
+import com.tauslop.dicom.Rotation
+import com.tauslop.dicom.Vec3
+import com.tauslop.dicom.Volume
+import kotlin.math.PI
+
+/**
+ * Orthographic camera orbiting a volume, in patient LPS coordinates.
+ *
+ * With [rotation] = identity the view is **coronal from the front**: looking along +Y
+ * (anterior → posterior), screen-up = +Z (head), screen-right = +X (patient left), so the
+ * patient's right is on screen left, matching coronal MPR. `right = forward × up`.
+ */
+data class OrbitCamera(
+    /** Point the camera looks at (patient mm). */
+    val target: Vec3,
+    /** Diameter (mm) that fits the shorter screen side at zoom 1: the volume's diagonal. */
+    val fieldMm: Double,
+    val rotation: Rotation = Rotation.IDENTITY,
+    val zoom: Double = 1.0,
+    /** Image offset on screen in mm (+x right, +y down). */
+    val panX: Double = 0.0,
+    val panY: Double = 0.0,
+) {
+    val forward: Vec3 get() = rotation.apply(Vec3.Y)
+    val up: Vec3 get() = rotation.apply(Vec3.Z)
+    val right: Vec3 get() = rotation.apply(Vec3.X)
+
+    /** mm per screen pixel for a [w]×[h] viewport. */
+    fun mmPerPixel(w: Int, h: Int): Double = fieldMm / zoom / minOf(w, h)
+
+    /**
+     * Trackball rotation for a finger drag of ([dx], [dy]) px on a view of [viewPx] px.
+     * The object follows the finger: dragging right turns its front to the right (we then see
+     * the patient's right side); dragging down tips its top toward the viewer. A drag across
+     * the full view turns 180°.
+     */
+    fun rotated(dx: Float, dy: Float, viewPx: Float): OrbitCamera {
+        val ax = PI * dx / viewPx
+        val ay = PI * dy / viewPx
+        // The camera orbits opposite to the desired object motion: about its up axis for
+        // horizontal drags, then about its (updated) right axis for vertical drags.
+        val r = rotation.then(Rotation.about(up, -ax)).let { r1 ->
+            r1.then(Rotation.about(r1.apply(Vec3.X), -ay))
+        }
+        return copy(rotation = orthonormalize(r))
+    }
+
+    fun zoomed(factor: Double): OrbitCamera = copy(zoom = (zoom * factor).coerceIn(0.25, 20.0))
+
+    /** Pan by a screen delta in pixels on a [w]×[h] view. */
+    fun panned(dxPx: Float, dyPx: Float, w: Int, h: Int): OrbitCamera {
+        val s = mmPerPixel(w, h)
+        return copy(panX = panX + dxPx * s, panY = panY + dyPx * s)
+    }
+
+    fun reset(): OrbitCamera = copy(rotation = Rotation.IDENTITY, zoom = 1.0, panX = 0.0, panY = 0.0)
+
+    /**
+     * Ray through the centre of pixel ([px], [py]) of a [w]×[h] view: origin on the plane through
+     * [target] facing the camera (shifted back by [fieldMm] so it starts outside the volume) and
+     * unit direction [forward].
+     */
+    fun ray(px: Double, py: Double, w: Int, h: Int): Pair<Vec3, Vec3> {
+        val s = mmPerPixel(w, h)
+        val u = (px + 0.5 - w / 2.0) * s - panX
+        val v = (py + 0.5 - h / 2.0) * s - panY
+        val origin = target + right * u - up * v - forward * fieldMm
+        return origin to forward
+    }
+
+    companion object {
+        /** Coronal-from-front camera framing the whole volume. */
+        fun forVolume(vol: Volume): OrbitCamera {
+            val c = vol.corners
+            var d = 0.0
+            for (a in c) for (b in c) d = maxOf(d, (a - b).length)
+            return OrbitCamera(vol.center, d)
+        }
+
+        /** Gram–Schmidt to stop drift after many incremental rotations. */
+        fun orthonormalize(r: Rotation): Rotation {
+            val x = r.cx.normalized()
+            val y = (r.cy - x * (r.cy dot x)).normalized()
+            val z = x cross y
+            return Rotation(x, y, z)
+        }
+    }
+}

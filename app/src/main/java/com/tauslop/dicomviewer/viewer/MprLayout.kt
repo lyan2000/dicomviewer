@@ -65,11 +65,13 @@ fun MprLayout(state: ViewerState, mpr: MprUi, actions: ViewerActions) {
 
 @Composable
 private fun MainView(state: ViewerState, mpr: MprUi, actions: ViewerActions, size: Dp) {
+    val is3d = mpr.threeDMain
+    val color = if (is3d) ThreeDColor else mpr.main.color()
     Box(
-        Modifier.size(size).border(2.dp, mpr.main.color()).padding(2.dp).onSizeChanged(actions.onViewSize),
+        Modifier.size(size).border(2.dp, color).padding(2.dp).onSizeChanged(actions.onViewSize),
     ) {
         ImageCanvas(
-            image = state.image,
+            image = if (is3d) mpr.vr.image else state.image,
             zoom = state.zoom,
             pan = state.pan,
             sliceCount = state.sliceCount,
@@ -78,28 +80,48 @@ private fun MainView(state: ViewerState, mpr: MprUi, actions: ViewerActions, siz
             onResetView = actions.onResetView,
             tool = state.tool,
             onWindowDrag = actions.onWindowDrag,
-            lines = mpr.mainLines,
-            onTap = actions.onTapImage,
+            lines = if (is3d) emptyList() else mpr.mainLines,
+            onTap = if (is3d) null else actions.onTapImage,
             onTwist = actions.onTwist,
         )
-        Text(mpr.mainLabel, color = mpr.main.color(), style = MaterialTheme.typography.labelMedium,
+        Text(if (is3d) mpr.vr.label else mpr.mainLabel, color = color, style = MaterialTheme.typography.labelMedium,
             modifier = Modifier.align(Alignment.TopStart).padding(6.dp))
-        if (state.sliceCount > 1) {
+        if (!is3d && state.sliceCount > 1) {
             SliceScrubber(state.targetIndex, state.sliceCount, actions.onSelectSlice, Modifier.align(Alignment.CenterEnd))
         }
     }
 }
 
+private val ThreeDColor = Color(0xFFE0E0E0)
+
 @Composable
 private fun RowScope.SmallViews(mpr: MprUi, actions: ViewerActions) {
     mpr.small.forEach { SmallTile(it, actions, Modifier.weight(1f)) }
-    ThreeDPlaceholder(Modifier.weight(1f))
+    if (!mpr.threeDMain) ThreeDTile(mpr.vr, actions, Modifier.weight(1f))
 }
 
 @Composable
 private fun ColumnScope.SmallViews(mpr: MprUi, actions: ViewerActions) {
     mpr.small.forEach { SmallTile(it, actions, Modifier.weight(1f)) }
-    ThreeDPlaceholder(Modifier.weight(1f))
+    if (!mpr.threeDMain) ThreeDTile(mpr.vr, actions, Modifier.weight(1f))
+}
+
+/** Small 3D tile: the latest render, or a status message while uploading. Tap to make it main. */
+@Composable
+private fun ThreeDTile(vr: VrUi, actions: ViewerActions, modifier: Modifier) {
+    Box(
+        modifier.padding(2.dp).border(1.dp, ThreeDColor).clickable(enabled = vr.image != null) { actions.onSwap3D() }
+            .padding(1.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (vr.image != null) FittedImage(vr.image, emptyList())
+        else Text(vr.label, color = Color.Gray, style = MaterialTheme.typography.labelSmall, textAlign = TextAlign.Center,
+            modifier = Modifier.padding(4.dp))
+        if (vr.image != null) {
+            Text(vr.label, color = ThreeDColor, style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.align(Alignment.TopStart).padding(4.dp))
+        }
+    }
 }
 
 @Composable
@@ -110,13 +132,6 @@ private fun SmallTile(v: SmallView, actions: ViewerActions, modifier: Modifier) 
         v.image?.let { FittedImage(it, v.lines) }
         Text(v.label, color = v.view.color(), style = MaterialTheme.typography.labelSmall,
             modifier = Modifier.align(Alignment.TopStart).padding(4.dp))
-    }
-}
-
-@Composable
-private fun ThreeDPlaceholder(modifier: Modifier) {
-    Box(modifier.padding(2.dp).border(1.dp, Color.DarkGray), contentAlignment = Alignment.Center) {
-        Text("3D\n(coming)", color = Color.Gray, style = MaterialTheme.typography.labelSmall, textAlign = TextAlign.Center)
     }
 }
 

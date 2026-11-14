@@ -46,6 +46,7 @@ class MainActivity : ComponentActivity() {
                         onCancelScan = viewModel::cancelScan,
                         onViewSize = viewModel::onViewSize,
                         onSwap = viewModel::swapMain,
+                        onSwap3D = viewModel::swapTo3D,
                         onTapImage = viewModel::tapAt,
                         onTwist = viewModel::twist,
                         onResetPlanes = viewModel::resetPlanes,
