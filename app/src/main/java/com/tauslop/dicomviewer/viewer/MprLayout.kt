@@ -76,17 +76,14 @@ private fun MainView(state: ViewerState, mpr: MprUi, actions: ViewerActions, siz
             onScroll = actions.onScroll,
             onTransform = actions.onTransform,
             onResetView = actions.onResetView,
-            wlMode = state.wlMode,
+            tool = state.tool,
             onWindowDrag = actions.onWindowDrag,
             lines = mpr.mainLines,
             onTap = actions.onTapImage,
+            onTwist = actions.onTwist,
         )
         Text(mpr.mainLabel, color = mpr.main.color(), style = MaterialTheme.typography.labelMedium,
             modifier = Modifier.align(Alignment.TopStart).padding(6.dp))
-        if (state.wlMode) {
-            Text("W/L: drag ↔ width, ↕ level", style = MaterialTheme.typography.labelSmall, color = Color(0xFF8AB4F8),
-                modifier = Modifier.align(Alignment.BottomCenter).padding(6.dp))
-        }
         if (state.sliceCount > 1) {
             SliceScrubber(state.targetIndex, state.sliceCount, actions.onSelectSlice, Modifier.align(Alignment.CenterEnd))
         }

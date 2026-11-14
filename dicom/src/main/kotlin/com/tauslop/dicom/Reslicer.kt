@@ -51,8 +51,7 @@ object Reslicer {
         pixelMm: Double = vol.minSpacing,
         maxDim: Int = 1024,
     ): Plane {
-        val right = rotation.apply(view.right).normalized()
-        val down = rotation.apply(view.down).normalized()
+        val (right, down) = displayAxes(view, rotation)
         val n = right cross down
         val c = vol.center
         val center = c + n * ((cursor - c) dot n)
@@ -68,6 +67,25 @@ object Reslicer {
         val w = (2 * halfW / pix + 1e-6).roundToInt() + 1
         val h = (2 * halfH / pix + 1e-6).roundToInt() + 1
         return Plane(center, right, down, w, h, pix)
+    }
+
+    /**
+     * Screen axes for [view] whose normal is rotated by [rotation]. Only the normal follows the
+     * rotation; the in-plane axes stay as close as possible to the standard ones (the projection
+     * of the standard "right" axis, or of "down" if right is nearly parallel to the normal). So
+     * twisting about a view's own normal leaves that view's image upright, and oblique views stay
+     * head-up.
+     */
+    fun displayAxes(view: MprView, rotation: Rotation): Pair<Vec3, Vec3> {
+        val n = rotation.apply(view.right cross view.down).normalized()
+        val r = view.right - n * (view.right dot n)
+        return if (r.length > 1e-3) {
+            val right = r.normalized()
+            right to (n cross right) // right × down = n  ⇒  down = n × right
+        } else {
+            val down = (view.down - n * (view.down dot n)).normalized()
+            (down cross n) to down
+        }
     }
 
     /** Samples [plane] with trilinear interpolation; outside the volume is filled with its minimum. */

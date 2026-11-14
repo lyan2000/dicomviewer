@@ -82,12 +82,32 @@ class MprTest {
         assertEquals(0.0, Reslicer.obliquity(MprView.AXIAL, r), 1e-6)
     }
 
+    @Test fun twistKeepsOwnViewUprightAndOthersHeadUp() {
+        val r = Rotation.about(Vec3.Z, Math.toRadians(30.0)) // twist about the axial normal
+        val (ar, ad) = Reslicer.displayAxes(MprView.AXIAL, r)
+        assertVec(Vec3.X, ar); assertVec(Vec3.Y, ad) // axial image doesn't spin
+        val (cr, cd) = Reslicer.displayAxes(MprView.CORONAL, r)
+        assertVec(-Vec3.Z, cd) // oblique coronal stays head-up
+        assertEquals(Math.cos(Math.toRadians(30.0)), cr dot Vec3.X, 1e-9)
+        // Default orientation reproduces the standard axes for every view.
+        for (v in MprView.entries) {
+            val (rr, dd) = Reslicer.displayAxes(v, Rotation.IDENTITY)
+            assertVec(v.right, rr); assertVec(v.down, dd)
+        }
+    }
+
+    private fun assertVec(e: Vec3, a: Vec3) {
+        assertEquals("x of $a", e.x, a.x, 1e-9); assertEquals("y of $a", e.y, a.y, 1e-9); assertEquals("z of $a", e.z, a.z, 1e-9)
+    }
+
     @Test fun obliqueOutsideIsFilled() {
         val vol = build()
-        val plane = Reslicer.planeFor(vol, MprView.AXIAL, vol.center, Rotation.about(Vec3.Z, PI / 4), pixelMm = 0.25)
+        // Coronal tilted 45° about Z: an oblique plane whose corners fall outside the volume.
+        val plane = Reslicer.planeFor(vol, MprView.CORONAL, vol.center, Rotation.about(Vec3.Z, PI / 4), pixelMm = 0.25)
         val f = Reslicer.sample(vol, plane)
         val corner = vol.toVoxel(plane.pointAt(0.0, 0.0))
-        assertTrue("corner should be outside: $corner", corner.x < 0 || corner.y < 0 || corner.x > nx - 1 || corner.y > ny - 1)
+        assertTrue("corner should be outside: $corner",
+            corner.x < -1e-6 || corner.y < -1e-6 || corner.x > nx - 1 + 1e-6 || corner.y > ny - 1 + 1e-6)
         assertEquals(vol.minValue.toInt(), f.at(0, 0))
         // Centre of an oblique plane through the volume centre interpolates the centre voxel value.
         val c = vol.toVoxel(plane.pointAt((plane.width - 1) / 2.0, (plane.height - 1) / 2.0))

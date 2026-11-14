@@ -54,13 +54,15 @@ class ViewerActions(
     val onTransform: (Float, Offset) -> Unit,
     val onResetView: () -> Unit,
     val onResetAll: () -> Unit,
-    val onToggleWl: () -> Unit,
+    val onTool: (Tool) -> Unit,
     val onPreset: (String) -> Unit,
     val onWindowDrag: (Float, Float, Float) -> Unit,
     val onCancelScan: () -> Unit,
     val onViewSize: (IntSize) -> Unit,
     val onSwap: (MprView) -> Unit,
     val onTapImage: (Float, Float) -> Unit,
+    val onTwist: (Float) -> Unit,
+    val onResetPlanes: () -> Unit,
 )
 
 private val Accent = Color(0xFF8AB4F8)
@@ -79,8 +81,8 @@ fun ViewerScreen(state: ViewerState, actions: ViewerActions) {
                     title = { Text(statusText(state), style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     actions = {
                         if (ready) {
-                            TextButton(onClick = actions.onToggleWl) {
-                                Text("W/L", color = if (state.wlMode) Accent else Color.Gray)
+                            if (state.mpr?.oblique == true) {
+                                TextButton(onClick = actions.onResetPlanes) { Text("Planes ⟲", color = Accent) }
                             }
                             TextButton(onClick = actions.onResetAll) { Text("Reset") }
                         }
@@ -102,6 +104,7 @@ fun ViewerScreen(state: ViewerState, actions: ViewerActions) {
                         }
                     }
                 }
+                if (ready) ToolRow(state, actions)
             }
         },
     ) { pad ->
@@ -160,14 +163,10 @@ fun ViewerScreen(state: ViewerState, actions: ViewerActions) {
                             onScroll = actions.onScroll,
                             onTransform = actions.onTransform,
                             onResetView = actions.onResetView,
-                            wlMode = state.wlMode,
+                            tool = state.tool,
                             onWindowDrag = actions.onWindowDrag,
                         )
                         state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                        if (state.wlMode) {
-                            Text("W/L mode: drag ↔ width, ↕ level", style = MaterialTheme.typography.labelSmall, color = Accent,
-                                modifier = Modifier.align(Alignment.TopCenter).padding(8.dp))
-                        }
                         listOfNotNull(state.stackReason, state.skippedNote).joinToString("\n").takeIf { it.isNotEmpty() }?.let {
                             Text(it, style = MaterialTheme.typography.labelSmall, color = Color.Gray,
                                 modifier = Modifier.align(Alignment.BottomStart).padding(8.dp))
@@ -198,6 +197,34 @@ fun ViewerScreen(state: ViewerState, actions: ViewerActions) {
             }
         }
     }
+}
+
+/**
+ * Mutually exclusive tool toggles for one-finger drag. Tapping the active tool turns it off,
+ * returning to the default (slice scrolling). Oblique is only offered in MPR.
+ */
+@Composable
+private fun ToolRow(state: ViewerState, actions: ViewerActions) {
+    val tools = listOf(Tool.PAN, Tool.ZOOM, Tool.WL) + if (state.mpr != null) listOf(Tool.OBLIQUE) else emptyList()
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        tools.forEach { t ->
+            FilterChip(selected = state.tool == t, onClick = { actions.onTool(t) }, label = { Text(t.label) })
+        }
+        Spacer(Modifier.weight(1f))
+        Text(toolHint(state.tool), style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+    }
+}
+
+private fun toolHint(t: Tool): String = when (t) {
+    Tool.SCROLL -> "drag ↕ slices"
+    Tool.PAN -> "drag to pan"
+    Tool.ZOOM -> "drag ↑ in, ↓ out"
+    Tool.WL -> "↔ width, ↕ level"
+    Tool.OBLIQUE -> "drag around ✛ to tilt"
 }
 
 private fun statusText(s: ViewerState): String {

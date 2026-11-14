@@ -40,13 +40,15 @@ class MainActivity : ComponentActivity() {
                         onTransform = viewModel::setTransform,
                         onResetView = viewModel::resetView,
                         onResetAll = viewModel::resetAll,
-                        onToggleWl = viewModel::toggleWlMode,
+                        onTool = viewModel::selectTool,
                         onPreset = viewModel::applyPreset,
                         onWindowDrag = viewModel::dragWindow,
                         onCancelScan = viewModel::cancelScan,
                         onViewSize = viewModel::onViewSize,
                         onSwap = viewModel::swapMain,
                         onTapImage = viewModel::tapAt,
+                        onTwist = viewModel::twist,
+                        onResetPlanes = viewModel::resetPlanes,
                     )
                 }
                 ViewerScreen(state, actions)

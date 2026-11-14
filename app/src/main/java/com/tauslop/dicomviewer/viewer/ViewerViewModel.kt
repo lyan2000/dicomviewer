@@ -62,8 +62,8 @@ data class ViewerState(
     /** Name of the active preset; null once the user drags the window. */
     val presetName: String? = null,
     val presetNames: List<String> = emptyList(),
-    /** One-finger drag adjusts window/level instead of scrolling. */
-    val wlMode: Boolean = false,
+    /** What a one-finger drag does on the main image. */
+    val tool: Tool = Tool.SCROLL,
     val zoom: Float = 1f,
     val pan: Offset = Offset.Zero,
     val skippedNote: String? = null,
@@ -85,6 +85,8 @@ data class MprUi(
     /** Reference lines for the main image, in its pixel coordinates. */
     val mainLines: List<RefLine>,
     val small: List<SmallView>,
+    /** Planes are rotated away from standard axial/coronal/sagittal. */
+    val oblique: Boolean,
 )
 
 data class SmallView(val view: MprView, val label: String, val image: ImageBitmap?, val lines: List<RefLine>)
@@ -124,6 +126,9 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
     private val smallImages = HashMap<MprView, ImageBitmap>()
     /** Reference lines matching each view's last rendered image. */
     private val viewLines = HashMap<MprView, List<RefLine>>()
+    /** True while the user is actively interacting (see [markInteracting]). */
+    private var fast = false
+    private var idleJob: Job? = null
     /** One renderer per view: each keeps a pixel buffer sized to its plane. */
     private val viewRenderers = MprView.entries.associateWith { FrameRenderer() }
 
@@ -132,7 +137,8 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
     private data class StackReq(val seriesIndex: Int, val index: Int, val window: Window?, override val generation: Int) : Req
     /** MPR mode: draw all views for this cursor/rotation/window. */
     private data class MprReq(
-        val cursor: Vec3, val rotation: Rotation, val main: MprView, val window: Window, override val generation: Int,
+        val cursor: Vec3, val rotation: Rotation, val main: MprView, val window: Window, val fast: Boolean,
+        override val generation: Int,
     ) : Req
 
     /** What to draw. A StateFlow is conflated, so fast interaction skips stale requests. */
@@ -312,6 +318,7 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         val m = mpr
         if (m != null) {
             m.goTo(m.main, index)
+            markInteracting()
             requestMpr()
             return
         }
@@ -326,7 +333,7 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
     fun scrollBy(steps: Int) {
         if (steps == 0) return
         val m = mpr
-        if (m != null) { m.scroll(m.main, steps); requestMpr() }
+        if (m != null) { m.scroll(m.main, steps); markInteracting(); requestMpr() }
         else showSlice(_state.value.targetIndex + steps)
     }
 
@@ -352,7 +359,8 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         applyPreset(_state.value.presetNames.firstOrNull() ?: Presets.AUTO)
     }
 
-    fun toggleWlMode() = _state.update { it.copy(wlMode = !it.wlMode) }
+    /** Toggle [tool] on; toggling the active tool off returns to slice scrolling. */
+    fun selectTool(tool: Tool) = _state.update { it.copy(tool = if (it.tool == tool) Tool.SCROLL else tool) }
 
     // ---- window/level ------------------------------------------------------
 
@@ -382,7 +390,7 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun setWindow(window: Window, name: String?) {
         _state.update { it.copy(window = window, presetName = name) }
-        if (mpr != null) requestMpr()
+        if (mpr != null) { markInteracting(); requestMpr() }
         else {
             val st = _state.value
             request.value = StackReq(st.seriesIndex, st.targetIndex, window, generation)
@@ -399,7 +407,7 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         val window = _state.value.window ?: return
         val d = m.depth(m.main)
         _state.update { it.copy(targetIndex = d.index, sliceCount = d.count) }
-        request.value = MprReq(m.cursor, m.rotation, m.main, window, generation)
+        request.value = MprReq(m.cursor, m.rotation, m.main, window, fast, generation)
     }
 
     private suspend fun renderMpr(r: MprReq) {
@@ -407,30 +415,35 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         val vol = m.volume
         try {
             val mainPlane = Reslicer.planeFor(vol, r.main, r.cursor, r.rotation)
-            val (frame, bmp) = withContext(Dispatchers.Default) {
-                val f = Reslicer.sample(vol, mainPlane)
-                f to viewRenderers.getValue(r.main).render(f, vol.rescale, r.window, userInvert = false).asImageBitmap()
+            // Small tiles are ~1/3 screen wide: 400 px is plenty, 192 px while interacting.
+            val smallPlanes = MprView.entries.filter { it != r.main }
+                .associateWith { Reslicer.planeFor(vol, it, r.cursor, r.rotation, maxDim = if (r.fast) 192 else 400) }
+            // All three views render in parallel (each view has its own renderer), so the small
+            // views update live without delaying the main one much.
+            val (mainResult, smallResults) = withContext(Dispatchers.Default) {
+                coroutineScope {
+                    val main = async {
+                        val f = Reslicer.sample(vol, mainPlane)
+                        f to viewRenderers.getValue(r.main).render(f, vol.rescale, r.window, userInvert = false).asImageBitmap()
+                    }
+                    val small = smallPlanes.map { (v, p) ->
+                        async { v to viewRenderers.getValue(v).render(Reslicer.sample(vol, p), vol.rescale, r.window, userInvert = false).asImageBitmap() }
+                    }
+                    main.await() to small.awaitAll()
+                }
             }
             if (r.generation != generation) return
+            val (frame, bmp) = mainResult
             mainFrame = frame
             mainRescale = vol.rescale
             smallImages[r.main] = bmp
             viewLines[r.main] = refLines(r.main, mainPlane, r)
+            for ((v, img) in smallResults) {
+                smallImages[v] = img
+                viewLines[v] = refLines(v, smallPlanes.getValue(v), r)
+            }
             val d = Reslicer.depth(vol, r.rotation.apply(r.main.scroll), r.cursor)
             _state.update { it.copy(image = bmp, sliceIndex = d.index, sliceCount = d.count, error = null, mpr = mprUi(m)) }
-
-            // Small views: skip if a newer request is already waiting (keeps the main view responsive).
-            for (v in MprView.entries.filter { it != r.main }) {
-                if (request.value !== r) return
-                val p = Reslicer.planeFor(vol, v, r.cursor, r.rotation)
-                val small = withContext(Dispatchers.Default) {
-                    viewRenderers.getValue(v).render(Reslicer.sample(vol, p), vol.rescale, r.window, userInvert = false).asImageBitmap()
-                }
-                if (r.generation != generation) return
-                smallImages[v] = small
-                viewLines[v] = refLines(v, p, r)
-            }
-            _state.update { it.copy(mpr = mprUi(m)) }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             _state.update { it.copy(error = "Cannot render: ${e.message}") }
@@ -442,7 +455,41 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         mainLabel = m.label(m.main),
         mainLines = viewLines[m.main].orEmpty(),
         small = m.smallViews.map { SmallView(it, m.label(it), smallImages[it], viewLines[it].orEmpty()) },
+        oblique = !m.rotation.isIdentity,
     )
+
+    /**
+     * Two-finger twist on the main view: rotate all planes about the main view's normal, through
+     * the cursor. The main image stays upright; its reference lines (the other planes) turn.
+     */
+    fun twist(degrees: Float) {
+        val m = mpr ?: return
+        val (right, down) = Reslicer.displayAxes(m.main, m.rotation)
+        m.rotation = m.rotation.then(Rotation.about(right cross down, Math.toRadians(degrees.toDouble())))
+        markInteracting()
+        requestMpr()
+    }
+
+    /** Back to standard axial/coronal/sagittal, keeping the cursor. */
+    fun resetPlanes() {
+        val m = mpr ?: return
+        m.rotation = Rotation.IDENTITY
+        requestMpr()
+    }
+
+    /**
+     * While the user is scrolling or twisting, small views render at low resolution; 250 ms after
+     * the last input they're redrawn at full quality.
+     */
+    private fun markInteracting() {
+        fast = true
+        idleJob?.cancel()
+        idleJob = viewModelScope.launch {
+            kotlinx.coroutines.delay(250)
+            fast = false
+            requestMpr()
+        }
+    }
 
     /** Lines where the other two planes cut [view]'s [plane], all through the cursor. */
     private fun refLines(view: MprView, plane: Plane, r: MprReq): List<RefLine> {
