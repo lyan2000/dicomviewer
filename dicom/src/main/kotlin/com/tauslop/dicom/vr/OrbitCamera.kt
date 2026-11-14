@@ -15,7 +15,7 @@ import kotlin.math.PI
 data class OrbitCamera(
     /** Point the camera looks at (patient mm). */
     val target: Vec3,
-    /** Diameter (mm) that fits the shorter screen side at zoom 1: the volume's diagonal. */
+    /** Extent (mm) that fits the shorter screen side at zoom 1. */
     val fieldMm: Double,
     val rotation: Rotation = Rotation.IDENTITY,
     val zoom: Double = 1.0,
@@ -59,24 +59,30 @@ data class OrbitCamera(
 
     /**
      * Ray through the centre of pixel ([px], [py]) of a [w]×[h] view: origin on the plane through
-     * [target] facing the camera (shifted back by [fieldMm] so it starts outside the volume) and
-     * unit direction [forward].
+     * [target] facing the camera, shifted back far enough to start outside the volume (the
+     * renderer clips rays to the volume box anyway), and unit direction [forward].
      */
     fun ray(px: Double, py: Double, w: Int, h: Int): Pair<Vec3, Vec3> {
         val s = mmPerPixel(w, h)
         val u = (px + 0.5 - w / 2.0) * s - panX
         val v = (py + 0.5 - h / 2.0) * s - panY
-        val origin = target + right * u - up * v - forward * fieldMm
+        val origin = target + right * u - up * v - forward * (fieldMm * 2)
         return origin to forward
     }
 
     companion object {
-        /** Coronal-from-front camera framing the whole volume. */
+        /**
+         * Coronal-from-front camera framed tightly on the volume as seen from the front (its
+         * extent along screen-right and screen-up, plus a 2% margin). Oblique rotations can then
+         * clip the corners; the user can pinch out.
+         */
         fun forVolume(vol: Volume): OrbitCamera {
+            val cam = OrbitCamera(vol.center, 1.0)
             val c = vol.corners
-            var d = 0.0
-            for (a in c) for (b in c) d = maxOf(d, (a - b).length)
-            return OrbitCamera(vol.center, d)
+            fun extent(axis: Vec3): Double = c.maxOf { it dot axis } - c.minOf { it dot axis }
+            // Corner voxel centres are half a voxel inside the box edges; the margin covers it.
+            val field = maxOf(extent(cam.right), extent(cam.up)) * 1.02
+            return cam.copy(fieldMm = field)
         }
 
         /** Gram–Schmidt to stop drift after many incremental rotations. */

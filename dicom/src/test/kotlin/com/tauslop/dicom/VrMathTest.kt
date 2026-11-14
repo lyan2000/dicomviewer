@@ -52,6 +52,18 @@ class VrMathTest {
         assertTrue(cam.reset().rotation.isIdentity)
     }
 
+    @Test fun defaultFramingFitsFrontView() {
+        // 20×20 voxels at 1 mm, 10 slices at 2 mm: front view spans 19 mm (x) by 18 mm (z).
+        val vol = Volume(20, 20, 10, ShortArray(4000), Vec3.ZERO, Vec3.X, Vec3.Y, -Vec3.Z, 1.0, 1.0, 2.0,
+            Voi.Rescale(1.0, 0.0), "MONOCHROME2")
+        val cam = OrbitCamera.forVolume(vol)
+        assertEquals(19.0 * 1.02, cam.fieldMm, 1e-9)
+        assertVec(vol.center, cam.target)
+        // The ray origin starts outside the volume so the whole box is traversed.
+        val (o, d) = cam.ray(0.0, 0.0, 10, 10)
+        assertTrue(((vol.center - o) dot d) > 20.0)
+    }
+
     @Test fun centreRayPassesThroughTarget() {
         val target = Vec3(10.0, -20.0, 30.0)
         val cam = OrbitCamera(target, 200.0).rotated(17f, -9f, 100f).zoomed(2.0)

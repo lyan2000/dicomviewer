@@ -43,7 +43,8 @@ class VolumeRenderer {
     private var readBuf: ByteBuffer? = null
     private var texFromPatient = FloatArray(16)
     private val uniforms = HashMap<String, Int>()
-    private var tfName: String? = null
+    /** Last transfer function uploaded (by identity: adjusted curves keep the preset's name). */
+    private var lastTf: TransferFunction? = null
 
     /** Max 3D texture edge reported by the GPU (valid after [init]). */
     var max3dSize = 0
@@ -130,7 +131,7 @@ class VolumeRenderer {
     suspend fun render(camera: OrbitCamera, tf: TransferFunction, w: Int, h: Int, stepMm: Double): Frame = withContext(gl) {
         val start = SystemClock.elapsedRealtime()
         ensureTarget(w, h)
-        if (tf.name != tfName) uploadTf(tf)
+        if (tf !== lastTf) uploadTf(tf)
 
         val (o00, dir) = camera.ray(0.0, 0.0, w, h)
         val (o10, _) = camera.ray(1.0, 0.0, w, h)
@@ -181,7 +182,7 @@ class VolumeRenderer {
         EGL14.eglDestroyContext(display, context)
         EGL14.eglTerminate(display)
         context = EGL14.EGL_NO_CONTEXT
-        fbo = 0; colorTex = 0; fbW = 0; fbH = 0; tfName = null
+        fbo = 0; colorTex = 0; fbW = 0; fbH = 0; lastTf = null
     }
 
     fun shutdown() = executor.shutdown()
@@ -201,7 +202,7 @@ class VolumeRenderer {
         for (p in listOf(GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_TEXTURE_WRAP_T)) {
             GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, p, GLES30.GL_CLAMP_TO_EDGE)
         }
-        tfName = tf.name
+        lastTf = tf
     }
 
     private fun ensureTarget(w: Int, h: Int) {

@@ -61,6 +61,8 @@ class ViewerActions(
     val onViewSize: (IntSize) -> Unit,
     val onSwap: (MprView) -> Unit,
     val onSwap3D: () -> Unit,
+    val onVrPreset: (String) -> Unit,
+    val onRotate3D: (Float, Float, Float) -> Unit,
     val onTapImage: (Float, Float) -> Unit,
     val onTwist: (Float) -> Unit,
     val onResetPlanes: () -> Unit,
@@ -91,15 +93,20 @@ fun ViewerScreen(state: ViewerState, actions: ViewerActions) {
                         TextButton(onClick = actions.onOpenFolder) { Text("Open") }
                     },
                 )
-                if (ready && state.presetNames.isNotEmpty()) {
+                // With 3D in the main view the chips select 3D presets; otherwise MPR/stack windows.
+                val vr = state.mpr?.takeIf { it.threeDMain }?.vr
+                val chipNames = vr?.presets ?: state.presetNames
+                val selected = if (vr != null) vr.presetName else state.presetName
+                val onChip = if (vr != null) actions.onVrPreset else actions.onPreset
+                if (ready && chipNames.isNotEmpty()) {
                     LazyRow(
                         contentPadding = PaddingValues(horizontal = 12.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        items(state.presetNames) { name ->
+                        items(chipNames) { name ->
                             FilterChip(
-                                selected = name == state.presetName,
-                                onClick = { actions.onPreset(name) },
+                                selected = name == selected,
+                                onClick = { onChip(name) },
                                 label = { Text(name) },
                             )
                         }
@@ -217,7 +224,8 @@ private fun ToolRow(state: ViewerState, actions: ViewerActions) {
             FilterChip(selected = state.tool == t, onClick = { actions.onTool(t) }, label = { Text(t.label) })
         }
         Spacer(Modifier.weight(1f))
-        Text(toolHint(state.tool), style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+        val hint = if (state.tool == Tool.SCROLL && state.mpr?.threeDMain == true) "drag to rotate" else toolHint(state.tool)
+        Text(hint, style = MaterialTheme.typography.labelSmall, color = Color.Gray)
     }
 }
 
@@ -231,6 +239,7 @@ private fun toolHint(t: Tool): String = when (t) {
 
 private fun statusText(s: ViewerState): String {
     if (s.phase != ViewerState.Phase.Ready || s.sliceCount == 0) return "DICOM Viewer"
+    s.mpr?.takeIf { it.threeDMain }?.let { return it.vr.label } // 3D: preset and render time
     val w = s.window?.let { " · W ${it.width.roundToInt()} L ${it.center.roundToInt()}" } ?: ""
     val p = s.presetName?.let { " · $it" } ?: ""
     val view = s.mpr?.let { "${it.mainLabel} " } ?: ""

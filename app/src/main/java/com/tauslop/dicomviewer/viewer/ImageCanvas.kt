@@ -55,7 +55,16 @@ fun ImageCanvas(
     onTap: ((u: Float, v: Float) -> Unit)? = null,
     /** Oblique tool: rotation in degrees (clockwise positive) swept around the cursor. */
     onTwist: (degrees: Float) -> Unit = {},
+    /**
+     * Camera mode (3D): [zoom]/[pan] drive gestures but the image is drawn simply fitted, because
+     * the renderer already applied them; the default one-finger drag calls [onRotate] instead of
+     * scrolling.
+     */
+    cameraMode: Boolean = false,
+    onRotate: (dx: Float, dy: Float, viewPx: Float) -> Unit = { _, _, _ -> },
 ) {
+    val camMode by rememberUpdatedState(cameraMode)
+    val rotate by rememberUpdatedState(onRotate)
     val currentImage by rememberUpdatedState(image)
     val currentZoom by rememberUpdatedState(zoom)
     val currentPan by rememberUpdatedState(pan)
@@ -121,7 +130,9 @@ fun ImageCanvas(
                         if (!dragging) continue
                         val d = ch.position - ch.previousPosition
                         when (currentTool) {
-                            Tool.SCROLL -> {
+                            Tool.SCROLL -> if (camMode) {
+                                rotate(d.x, d.y, minOf(size.width, size.height).toFloat())
+                            } else {
                                 acc += d.y
                                 val steps = (-acc / pxPerSlice).toInt()
                                 if (steps != 0) {
@@ -164,7 +175,11 @@ fun ImageCanvas(
             },
     ) {
         val img = image ?: return@Canvas
-        val (fit, topLeft) = layout(size.width, size.height, img)
+        val (fit, topLeft) = if (cameraMode) {
+            // Already zoomed/panned by the renderer: just fit it.
+            val f = min(size.width / img.width, size.height / img.height)
+            f to Offset((size.width - img.width * f) / 2f, (size.height - img.height * f) / 2f)
+        } else layout(size.width, size.height, img)
         drawImage(
             img,
             srcOffset = IntOffset.Zero,

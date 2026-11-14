@@ -83,6 +83,8 @@ private fun MainView(state: ViewerState, mpr: MprUi, actions: ViewerActions, siz
             lines = if (is3d) emptyList() else mpr.mainLines,
             onTap = if (is3d) null else actions.onTapImage,
             onTwist = actions.onTwist,
+            cameraMode = is3d,
+            onRotate = actions.onRotate3D,
         )
         Text(if (is3d) mpr.vr.label else mpr.mainLabel, color = color, style = MaterialTheme.typography.labelMedium,
             modifier = Modifier.align(Alignment.TopStart).padding(6.dp))

@@ -96,8 +96,16 @@ data class MprUi(
     val vr: VrUi,
 )
 
-/** 3D view: latest rendered image and a status label (preset, render time, or progress). */
-data class VrUi(val image: ImageBitmap?, val label: String)
+/**
+ * 3D view: latest rendered image, a status label (preset, render time, or progress), the 3D
+ * preset names for the chip row, and the selected one (null once the curve is adjusted by W/L).
+ */
+data class VrUi(
+    val image: ImageBitmap?,
+    val label: String,
+    val presets: List<String> = TransferFunction.PRESETS.map { it.name },
+    val presetName: String? = null,
+)
 
 data class SmallView(val view: MprView, val label: String, val image: ImageBitmap?, val lines: List<RefLine>)
 
@@ -145,13 +153,21 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
     // ---- 3D (volume rendering) state ----
     private val vrRenderer = VolumeRenderer()
     private var vrCamera: OrbitCamera? = null
+    /** Selected 3D preset, and the curve actually rendered (the preset, possibly W/L-adjusted). */
+    private var vrPreset: TransferFunction = TransferFunction.BONE
     private var vrTf: TransferFunction = TransferFunction.BONE
+    private val vrAdjusted: Boolean get() = vrTf !== vrPreset
     private var vrReady = false
     private var vrStatus = "3D"
     private var vrImage: ImageBitmap? = null
     private var threeDMain = false
     private var vrJob: Job? = null
-    private data class VrReq(val camera: OrbitCamera, val tf: TransferFunction, val w: Int, val h: Int, val generation: Int)
+    private data class VrReq(
+        val camera: OrbitCamera, val tf: TransferFunction, val w: Int, val h: Int, val stepMm: Double, val generation: Int,
+    )
+    /** True while the user is rotating/zooming the 3D view: render at half size, coarser steps. */
+    private var vrFast = false
+    private var vrIdleJob: Job? = null
     private val vrRequest = MutableStateFlow<VrReq?>(null)
 
     private sealed interface Req { val generation: Int }
@@ -393,19 +409,41 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         val m = mpr ?: return
         if (threeDMain) return
         threeDMain = true
-        _state.update { it.copy(zoom = 1f, pan = Offset.Zero, mpr = mprUi(m)) }
+        // Gesture state mirrors the camera, so pinch/pan continue from its current zoom/pan.
+        val cam = vrCamera
+        val z = cam?.zoom?.toFloat() ?: 1f
+        val p = cam?.let { cameraPanPx(it) } ?: Offset.Zero
+        _state.update { it.copy(zoom = z, pan = p, mpr = mprUi(m)) }
         requestVr()
     }
 
     fun setTransform(zoom: Float, pan: Offset) {
-        _state.update { it.copy(zoom = zoom.coerceIn(0.5f, 20f), pan = pan) }
+        val z = zoom.coerceIn(0.5f, 20f)
+        val cam = vrCamera
+        if (threeDMain && cam != null) {
+            // 3D: zoom/pan move the camera (re-rendered sharply); the image itself is drawn fitted.
+            val s = cam.fieldMm / z / maxOf(minOf(viewSize.width, viewSize.height), 1)
+            vrCamera = cam.copy(zoom = z.toDouble(), panX = pan.x * s, panY = pan.y * s)
+            markVrInteracting()
+            requestVr()
+        }
+        _state.update { it.copy(zoom = z, pan = pan) }
     }
 
-    fun resetView() = setTransform(1f, Offset.Zero)
+    /** Double-tap: fit the image; in 3D also return the camera to the coronal view. */
+    fun resetView() {
+        val cam = vrCamera
+        if (threeDMain && cam != null) {
+            vrCamera = cam.reset()
+            requestVr()
+        }
+        _state.update { it.copy(zoom = 1f, pan = Offset.Zero) }
+    }
 
-    /** Reset zoom/pan and return to the default window. */
+    /** Reset zoom/pan and return to the default window (in 3D: coronal camera, unadjusted preset). */
     fun resetAll() {
         resetView()
+        if (threeDMain) { applyVrPreset(vrPreset.name); return }
         fileWindowIndex = 0
         applyPreset(_state.value.presetNames.firstOrNull() ?: Presets.AUTO)
     }
@@ -434,6 +472,7 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
      * A full-width drag spans the series' value range.
      */
     fun dragWindow(dx: Float, dy: Float, viewWidth: Float) {
+        if (threeDMain) { dragVrWindow(dx, dy, viewWidth); return }
         val w = _state.value.window ?: return
         val perPx = valueSpan / maxOf(viewWidth, 1f)
         setWindow(Window(w.center - dy * perPx, maxOf(1.0, w.width + dx * perPx)), name = null)
@@ -510,8 +549,34 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
             .map { SmallView(it, m.label(it), smallImages[it], viewLines[it].orEmpty()) },
         oblique = !m.rotation.isIdentity,
         threeDMain = threeDMain,
-        vr = VrUi(vrImage, vrStatus),
+        vr = VrUi(vrImage, vrStatus, presetName = if (vrAdjusted) null else vrPreset.name),
     )
+
+    private val vrTfLabel: String get() = if (vrAdjusted) "${vrPreset.name} (adjusted)" else vrPreset.name
+
+    /** Select a 3D preset (discarding any W/L adjustment). */
+    fun applyVrPreset(name: String) {
+        val tf = TransferFunction.PRESETS.firstOrNull { it.name == name } ?: return
+        vrPreset = tf
+        vrTf = tf
+        publishMpr()
+        requestVr()
+    }
+
+    /**
+     * W/L drag with 3D in the main view: shift (vertical; up = denser tissue only) and stretch
+     * (horizontal; right = wider) the active curve's visible HU range. MPR windows are untouched.
+     */
+    private fun dragVrWindow(dx: Float, dy: Float, viewWidth: Float) {
+        val r = vrTf.visibleRange
+        val c = (r.start + r.endInclusive) / 2
+        val w = r.endInclusive - r.start
+        val perPx = 4096.0 / maxOf(viewWidth, 1f) // a full-width drag spans the CT range
+        vrTf = vrPreset.windowed(c - dy * perPx, maxOf(10.0, w + dx * perPx))
+        markVrInteracting()
+        publishMpr()
+        requestVr()
+    }
 
     private fun publishMpr() {
         val m = mpr ?: return
@@ -537,7 +602,7 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
                 if (gen != generation) return@launch
                 vrCamera = OrbitCamera.forVolume(vol)
                 vrReady = true
-                vrStatus = "3D · ${vrTf.name}"
+                vrStatus = "3D · $vrTfLabel"
                 publishMpr()
                 requestVr()
             } catch (e: Exception) {
@@ -548,20 +613,51 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Main square: up to 720 px (from the measured view size); small tile: 384 px. */
+    /**
+     * Main square: up to 720 px (from the measured view size); small tile: 384 px. While
+     * interacting: half size and 2 mm steps, roughly 1/8 of the full-quality work.
+     */
     private fun requestVr() {
         val cam = vrCamera ?: return
         if (!vrReady) return
-        val side = if (threeDMain) viewSize.width.coerceIn(256, 720).takeIf { viewSize.width > 0 } ?: 512 else 384
-        vrRequest.value = VrReq(cam, vrTf, side, side, generation)
+        var side = if (threeDMain) viewSize.width.coerceIn(256, 720).takeIf { viewSize.width > 0 } ?: 512 else 384
+        val fast = vrFast && threeDMain
+        if (fast) side /= 2
+        vrRequest.value = VrReq(cam, vrTf, side, side, if (fast) 2.0 else 1.0, generation)
+    }
+
+    /** Low-quality frames while the camera moves; full quality 250 ms after the last change. */
+    private fun markVrInteracting() {
+        vrFast = true
+        vrIdleJob?.cancel()
+        vrIdleJob = viewModelScope.launch {
+            kotlinx.coroutines.delay(250)
+            vrFast = false
+            requestVr()
+        }
+    }
+
+    /** Camera pan (mm) expressed in screen pixels of the main view, for the gesture state. */
+    private fun cameraPanPx(cam: OrbitCamera): Offset {
+        val s = cam.fieldMm / cam.zoom / maxOf(minOf(viewSize.width, viewSize.height), 1)
+        return Offset((cam.panX / s).toFloat(), (cam.panY / s).toFloat())
+    }
+
+    /** One-finger drag on the 3D main view: trackball rotation. */
+    fun rotate3D(dx: Float, dy: Float, viewPx: Float) {
+        val cam = vrCamera ?: return
+        if (!threeDMain) return
+        vrCamera = cam.rotated(dx, dy, viewPx)
+        markVrInteracting()
+        requestVr()
     }
 
     private suspend fun renderVr(r: VrReq) {
         try {
-            val f = vrRenderer.render(r.camera, r.tf, r.w, r.h, stepMm = 1.0)
+            val f = vrRenderer.render(r.camera, r.tf, r.w, r.h, stepMm = r.stepMm)
             if (r.generation != generation) return
             vrImage = f.bitmap.asImageBitmap()
-            vrStatus = "3D · ${r.tf.name} · ${f.millis} ms"
+            vrStatus = "3D · $vrTfLabel · ${f.millis} ms"
             publishMpr()
         } catch (e: Exception) {
             if (e is CancellationException) throw e
@@ -686,6 +782,15 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
     fun onViewSize(size: IntSize) {
         val old = viewSize
         viewSize = size
+        val cam = vrCamera
+        if (threeDMain && cam != null) {
+            // 3D: the camera holds pan in mm; re-express it in this view's pixels and re-render.
+            if (old != size) {
+                _state.update { it.copy(pan = cameraPanPx(cam)) }
+                requestVr()
+            }
+            return
+        }
         val img = _state.value.image ?: return
         if (old == IntSize.Zero || old == size || size.width == 0 || size.height == 0) return
         val oldFit = minOf(old.width.toFloat() / img.width, old.height.toFloat() / img.height)
