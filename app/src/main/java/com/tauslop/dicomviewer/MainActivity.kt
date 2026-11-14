@@ -1,6 +1,7 @@
 package com.tauslop.dicomviewer
 
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -26,9 +27,7 @@ class MainActivity : ComponentActivity() {
                 val state by viewModel.state.collectAsStateWithLifecycle()
                 val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
                     if (uri != null) {
-                        runCatching {
-                            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                        }
+                        keepOnlyGrant(uri)
                         viewModel.openFolder(uri)
                     }
                 }
@@ -44,10 +43,25 @@ class MainActivity : ComponentActivity() {
                         onToggleWl = viewModel::toggleWlMode,
                         onPreset = viewModel::applyPreset,
                         onWindowDrag = viewModel::dragWindow,
+                        onCancelScan = viewModel::cancelScan,
+                        onViewSize = viewModel::onViewSize,
                     )
                 }
                 ViewerScreen(state, actions)
             }
         }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        viewModel.saveSession()
+    }
+
+    /** Persist read access to [uri] across restarts, releasing grants for folders no longer used. */
+    private fun keepOnlyGrant(uri: Uri) {
+        runCatching { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+        contentResolver.persistedUriPermissions
+            .filter { it.uri != uri }
+            .forEach { runCatching { contentResolver.releasePersistableUriPermission(it.uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) } }
     }
 }

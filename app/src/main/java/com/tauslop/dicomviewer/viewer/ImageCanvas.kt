@@ -39,9 +39,9 @@ fun ImageCanvas(
     onScroll: (steps: Int) -> Unit,
     onTransform: (zoom: Float, pan: Offset) -> Unit,
     onResetView: () -> Unit,
+    modifier: Modifier = Modifier,
     wlMode: Boolean = false,
     onWindowDrag: (dx: Float, dy: Float, viewWidth: Float) -> Unit = { _, _, _ -> },
-    modifier: Modifier = Modifier,
 ) {
     val wl by rememberUpdatedState(wlMode)
     val windowDrag by rememberUpdatedState(onWindowDrag)

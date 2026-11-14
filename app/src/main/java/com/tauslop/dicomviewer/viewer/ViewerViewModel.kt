@@ -11,7 +11,10 @@ import com.tauslop.dicom.Series
 import com.tauslop.dicom.SkipReason
 import com.tauslop.dicom.Voi
 import com.tauslop.dicom.Window
+import androidx.compose.ui.unit.IntSize
 import com.tauslop.dicomviewer.data.LoadedSlice
+import com.tauslop.dicomviewer.data.Session
+import com.tauslop.dicomviewer.data.SessionStore
 import com.tauslop.dicomviewer.data.SliceCache
 import com.tauslop.dicomviewer.io.FolderScanner
 import com.tauslop.dicomviewer.render.FrameRenderer
@@ -50,6 +53,8 @@ data class ViewerState(
     val pan: Offset = Offset.Zero,
     val skippedNote: String? = null,
     val error: String? = null,
+    /** Informational message on the start screen (e.g. lost access to the last folder). */
+    val notice: String? = null,
 ) {
     enum class Phase { Idle, Scanning, Ready, Error }
 }
@@ -79,19 +84,40 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
     private val request = MutableStateFlow<RenderRequest?>(null)
     private var generation = 0
 
+    private val sessions = SessionStore(app)
+    private var tree: Uri? = null
+    private var viewSize = IntSize.Zero
+
     init {
         viewModelScope.launch {
             request.filterNotNull().collect { render(it) }
         }
+        restoreSession()
     }
 
-    fun openFolder(tree: Uri) {
+    /** Reopen the last folder if we still hold a persisted read grant for it. */
+    private fun restoreSession() {
+        val s = sessions.load() ?: return
+        val granted = getApplication<Application>().contentResolver.persistedUriPermissions
+            .any { it.uri == s.tree && it.isReadPermission }
+        if (granted) openFolder(s.tree, s)
+        else {
+            sessions.clear()
+            _state.update { it.copy(notice = "Access to the last folder was lost. Please open it again.") }
+        }
+    }
+
+    fun openFolder(tree: Uri) = openFolder(tree, restore = null)
+
+    private fun openFolder(tree: Uri, restore: Session?) {
         scanJob?.cancel()
         prefetchJob?.cancel()
         generation++
         request.value = null
         current = null
+        series = emptyList()
         cache.clear()
+        this.tree = tree
         _state.value = ViewerState(phase = ViewerState.Phase.Scanning)
         scanJob = viewModelScope.launch {
             try {
@@ -101,32 +127,70 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
                 series = result.series
                 val note = skippedNote(result.skipped)
                 if (series.isEmpty()) {
-                    _state.update {
-                        it.copy(phase = ViewerState.Phase.Error, error = "No displayable images found.", skippedNote = note)
-                    }
+                    val msg = if (result.skipped.isEmpty()) "This folder contains no files." else "No displayable images in this folder."
+                    _state.update { it.copy(phase = ViewerState.Phase.Error, error = msg, skippedNote = note) }
                     return@launch
                 }
                 _state.update {
                     it.copy(phase = ViewerState.Phase.Ready, series = series.map(::summary), skippedNote = note)
                 }
-                selectSeries(0)
+                val idx = restore?.seriesUid?.let { uid -> series.indexOfFirst { it.seriesUid == uid } } ?: -1
+                if (restore != null && idx >= 0) selectSeries(idx, restore.sliceIndex, restore.window, restore.presetName)
+                else selectSeries(0)
+                saveSession()
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
-                _state.update { it.copy(phase = ViewerState.Phase.Error, error = "Scan failed: ${e.message}") }
+                val msg = when (e) {
+                    is SecurityException -> "Lost access to this folder. Please open it again."
+                    else -> "Could not read folder: ${e.message ?: e.javaClass.simpleName}"
+                }
+                if (e is SecurityException) sessions.clear()
+                _state.update { it.copy(phase = ViewerState.Phase.Error, error = msg) }
             }
         }
     }
 
-    fun selectSeries(index: Int) {
+    fun cancelScan() {
+        scanJob?.cancel()
+        tree = null
+        _state.value = ViewerState(notice = "Scan cancelled.")
+    }
+
+    /** Persist folder, series, slice and window (called when the app goes to the background). */
+    fun saveSession() {
+        val t = tree ?: return
+        val st = _state.value
+        sessions.save(Session(t, series.getOrNull(st.seriesIndex)?.seriesUid, st.targetIndex, st.window, st.presetName))
+    }
+
+    fun selectSeries(index: Int) = selectSeries(index, 0, null, null)
+
+    private fun selectSeries(index: Int, startSlice: Int, window: Window?, presetName: String?) {
         val s = series.getOrNull(index) ?: return
         generation++
         current = null
         fileWindowIndex = 0
+        val start = startSlice.coerceIn(0, s.size - 1)
         _state.update {
-            it.copy(seriesIndex = index, targetIndex = 0, sliceIndex = 0, sliceCount = s.size, window = null,
-                presetName = null, presetNames = emptyList(), image = null, zoom = 1f, pan = Offset.Zero)
+            it.copy(seriesIndex = index, targetIndex = start, sliceIndex = start, sliceCount = s.size, window = window,
+                presetName = if (window != null) presetName else null, presetNames = emptyList(), image = null,
+                zoom = 1f, pan = Offset.Zero)
         }
-        showSlice(0)
+        showSlice(start)
+    }
+
+    /**
+     * The image area changed size (e.g. rotation). Scale the pan so the same image point stays
+     * centred: pan is in screen pixels, and the fit scale changes with the view.
+     */
+    fun onViewSize(size: IntSize) {
+        val old = viewSize
+        viewSize = size
+        val img = _state.value.image ?: return
+        if (old == IntSize.Zero || old == size || size.width == 0 || size.height == 0) return
+        val oldFit = minOf(old.width.toFloat() / img.width, old.height.toFloat() / img.height)
+        val newFit = minOf(size.width.toFloat() / img.width, size.height.toFloat() / img.height)
+        _state.update { it.copy(pan = it.pan * (newFit / oldFit)) }
     }
 
     /** Jump to slice [index] (clamped). */

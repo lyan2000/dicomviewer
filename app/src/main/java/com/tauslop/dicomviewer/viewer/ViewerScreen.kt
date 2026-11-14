@@ -37,7 +37,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import kotlin.math.roundToInt
 
@@ -53,6 +56,8 @@ class ViewerActions(
     val onToggleWl: () -> Unit,
     val onPreset: (String) -> Unit,
     val onWindowDrag: (Float, Float, Float) -> Unit,
+    val onCancelScan: () -> Unit,
+    val onViewSize: (IntSize) -> Unit,
 )
 
 private val Accent = Color(0xFF8AB4F8)
@@ -99,7 +104,15 @@ fun ViewerScreen(state: ViewerState, actions: ViewerActions) {
     ) { pad ->
         Box(Modifier.fillMaxSize().padding(pad).background(Color.Black), contentAlignment = Alignment.Center) {
             when (state.phase) {
-                ViewerState.Phase.Idle -> Button(onClick = actions.onOpenFolder) { Text("Open folder") }
+                ViewerState.Phase.Idle -> Column(Modifier.padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("Open a folder of DICOM files to view it.", color = Color.Gray, textAlign = TextAlign.Center)
+                    state.notice?.let {
+                        Spacer(Modifier.height(8.dp))
+                        Text(it, style = MaterialTheme.typography.bodySmall, color = Accent, textAlign = TextAlign.Center)
+                    }
+                    Spacer(Modifier.height(16.dp))
+                    Button(onClick = actions.onOpenFolder) { Text("Open folder") }
+                }
                 ViewerState.Phase.Scanning -> Column(Modifier.padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(if (state.scanTotal == 0) "Listing files…" else "Reading headers ${state.scanDone} / ${state.scanTotal}")
                     Spacer(Modifier.height(12.dp))
@@ -107,15 +120,23 @@ fun ViewerScreen(state: ViewerState, actions: ViewerActions) {
                         progress = { state.scanDone.toFloat() / state.scanTotal },
                         modifier = Modifier.fillMaxWidth(),
                     ) else LinearProgressIndicator(Modifier.fillMaxWidth())
+                    Spacer(Modifier.height(12.dp))
+                    TextButton(onClick = actions.onCancelScan) { Text("Cancel") }
                 }
-                ViewerState.Phase.Error -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(state.error ?: "Error")
-                    state.skippedNote?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                ViewerState.Phase.Error -> Column(Modifier.padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(state.error ?: "Error", textAlign = TextAlign.Center)
+                    state.skippedNote?.let {
+                        Spacer(Modifier.height(4.dp))
+                        Text(it, style = MaterialTheme.typography.bodySmall, color = Color.Gray, textAlign = TextAlign.Center)
+                    }
                     Spacer(Modifier.height(12.dp))
                     Button(onClick = actions.onOpenFolder) { Text("Open another folder") }
                 }
                 ViewerState.Phase.Ready -> Row(Modifier.fillMaxSize()) {
-                    Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
+                    Box(
+                        Modifier.weight(1f).fillMaxHeight().onSizeChanged(actions.onViewSize),
+                        contentAlignment = Alignment.Center,
+                    ) {
                         ImageCanvas(
                             image = state.image,
                             zoom = state.zoom,
