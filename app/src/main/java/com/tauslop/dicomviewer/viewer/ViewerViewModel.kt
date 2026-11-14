@@ -20,6 +20,7 @@ import com.tauslop.dicom.Voi
 import com.tauslop.dicom.VolumeBuilder
 import com.tauslop.dicom.Window
 import com.tauslop.dicomviewer.data.LoadedSlice
+import com.tauslop.dicomviewer.data.MprPlace
 import com.tauslop.dicomviewer.data.Session
 import com.tauslop.dicomviewer.data.SessionStore
 import com.tauslop.dicomviewer.data.SliceCache
@@ -203,7 +204,7 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 _state.update { it.copy(series = series.map(::summary), skippedNote = note) }
                 val idx = restore?.seriesUid?.let { uid -> series.indexOfFirst { it.seriesUid == uid } } ?: -1
-                if (restore != null && idx >= 0) selectSeries(idx, restore.sliceIndex, restore.window, restore.presetName)
+                if (restore != null && idx >= 0) selectSeries(idx, restore.sliceIndex, restore.window, restore.presetName, restore.mpr)
                 else selectSeries(0)
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
@@ -229,14 +230,15 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         val t = tree ?: return
         val st = _state.value
         val slice = mpr?.let { it.depth(MprView.AXIAL).index } ?: st.targetIndex
-        sessions.save(Session(t, series.getOrNull(st.seriesIndex)?.seriesUid, slice, st.window, st.presetName))
+        val place = mpr?.let { MprPlace(it.main, it.cursor, it.rotation) }
+        sessions.save(Session(t, series.getOrNull(st.seriesIndex)?.seriesUid, slice, st.window, st.presetName, place))
     }
 
     // ---- series / volume ---------------------------------------------------
 
-    fun selectSeries(index: Int) = selectSeries(index, 0, null, null)
+    fun selectSeries(index: Int) = selectSeries(index, 0, null, null, null)
 
-    private fun selectSeries(index: Int, startSlice: Int, window: Window?, presetName: String?) {
+    private fun selectSeries(index: Int, startSlice: Int, window: Window?, presetName: String?, place: MprPlace?) {
         val s = series.getOrNull(index) ?: return
         buildJob?.cancel()
         prefetchJob?.cancel()
@@ -257,11 +259,11 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
                 _state.update { it.copy(phase = ViewerState.Phase.Ready, stackReason = "MPR unavailable: ${check.reason}") }
                 showSlice(start)
             }
-            is VolumeBuilder.Check.Ok -> buildVolume(s, check.plan, start)
+            is VolumeBuilder.Check.Ok -> buildVolume(s, check.plan, start, place)
         }
     }
 
-    private fun buildVolume(s: Series<Uri>, plan: VolumeBuilder.Plan, startSlice: Int) {
+    private fun buildVolume(s: Series<Uri>, plan: VolumeBuilder.Plan, startSlice: Int, place: MprPlace?) {
         val gen = generation
         _state.update { it.copy(phase = ViewerState.Phase.Building, scanDone = 0, scanTotal = s.size) }
         buildJob = viewModelScope.launch {
@@ -289,7 +291,11 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
                 valueSpan = withContext(Dispatchers.Default) {
                     maxOf((vol.maxValue - vol.minValue) * kotlin.math.abs(vol.rescale.slope), 64.0)
                 }
-                val session = MprSession(vol).apply { goTo(MprView.AXIAL, startSlice) }
+                val session = MprSession(vol).apply {
+                    goTo(MprView.AXIAL, startSlice)
+                    // Restore view, cursor and plane tilt if they were saved for this series.
+                    if (place != null) { main = place.main; cursor = place.cursor; rotation = place.rotation }
+                }
                 mpr = session
                 val st = _state.value
                 val window = st.window ?: first.fileWindows.firstOrNull() ?: autoWindow(first.frame, first.rescale)

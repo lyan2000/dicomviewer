@@ -2,15 +2,22 @@ package com.tauslop.dicomviewer.data
 
 import android.content.Context
 import android.net.Uri
+import com.tauslop.dicom.MprView
+import com.tauslop.dicom.Rotation
+import com.tauslop.dicom.Vec3
 import com.tauslop.dicom.Window
 
-/** Where the user left off: folder, series, slice and window. */
+/** MPR navigation state: which view is main, the cursor (patient mm) and the plane rotation. */
+data class MprPlace(val main: MprView, val cursor: Vec3, val rotation: Rotation)
+
+/** Where the user left off: folder, series, slice, window and (in MPR) view/cursor/rotation. */
 data class Session(
     val tree: Uri,
     val seriesUid: String?,
     val sliceIndex: Int,
     val window: Window?,
     val presetName: String?,
+    val mpr: MprPlace? = null,
 )
 
 class SessionStore(context: Context) {
@@ -27,8 +34,22 @@ class SessionStore(context: Context) {
             sliceIndex = prefs.getInt(KEY_SLICE, 0),
             window = window,
             presetName = prefs.getString(KEY_PRESET, null),
+            mpr = loadMpr(),
         )
     }
+
+    /** Parsed defensively: anything malformed just means no MPR restore. */
+    private fun loadMpr(): MprPlace? = runCatching {
+        val main = MprView.valueOf(prefs.getString(KEY_MAIN, null) ?: return null)
+        val c = (prefs.getString(KEY_CURSOR, null) ?: return null).split(',').map { it.toDouble() }
+        val r = (prefs.getString(KEY_ROTATION, null) ?: return null).split(',').map { it.toDouble() }
+        if (c.size != 3 || r.size != 9) return null
+        MprPlace(
+            main,
+            Vec3(c[0], c[1], c[2]),
+            Rotation(Vec3(r[0], r[1], r[2]), Vec3(r[3], r[4], r[5]), Vec3(r[6], r[7], r[8])),
+        )
+    }.getOrNull()
 
     fun save(s: Session) {
         val e = prefs.edit()
@@ -40,6 +61,15 @@ class SessionStore(context: Context) {
             e.putFloat(KEY_WC, s.window.center.toFloat()).putFloat(KEY_WW, s.window.width.toFloat())
         } else {
             e.remove(KEY_WC).remove(KEY_WW)
+        }
+        val m = s.mpr
+        if (m != null) {
+            val r = m.rotation
+            e.putString(KEY_MAIN, m.main.name)
+                .putString(KEY_CURSOR, listOf(m.cursor.x, m.cursor.y, m.cursor.z).joinToString(","))
+                .putString(KEY_ROTATION, listOf(r.cx, r.cy, r.cz).flatMap { listOf(it.x, it.y, it.z) }.joinToString(","))
+        } else {
+            e.remove(KEY_MAIN).remove(KEY_CURSOR).remove(KEY_ROTATION)
         }
         e.apply()
     }
@@ -53,5 +83,8 @@ class SessionStore(context: Context) {
         const val KEY_WC = "wc"
         const val KEY_WW = "ww"
         const val KEY_PRESET = "preset"
+        const val KEY_MAIN = "mprMain"
+        const val KEY_CURSOR = "mprCursor"
+        const val KEY_ROTATION = "mprRotation"
     }
 }
