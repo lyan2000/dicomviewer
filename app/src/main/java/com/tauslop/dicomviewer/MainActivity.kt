@@ -40,6 +40,10 @@ class MainActivity : ComponentActivity() {
                         onScroll = viewModel::scrollBy,
                         onTransform = viewModel::setTransform,
                         onResetView = viewModel::resetView,
+                        onResetAll = viewModel::resetAll,
+                        onToggleWl = viewModel::toggleWlMode,
+                        onPreset = viewModel::applyPreset,
+                        onWindowDrag = viewModel::dragWindow,
                     )
                 }
                 ViewerScreen(state, actions)

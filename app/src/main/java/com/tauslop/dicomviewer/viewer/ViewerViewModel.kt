@@ -11,6 +11,7 @@ import com.tauslop.dicom.Series
 import com.tauslop.dicom.SkipReason
 import com.tauslop.dicom.Voi
 import com.tauslop.dicom.Window
+import com.tauslop.dicomviewer.data.LoadedSlice
 import com.tauslop.dicomviewer.data.SliceCache
 import com.tauslop.dicomviewer.io.FolderScanner
 import com.tauslop.dicomviewer.render.FrameRenderer
@@ -40,6 +41,11 @@ data class ViewerState(
     val sliceCount: Int = 0,
     val image: ImageBitmap? = null,
     val window: Window? = null,
+    /** Name of the active preset; null once the user drags the window. */
+    val presetName: String? = null,
+    val presetNames: List<String> = emptyList(),
+    /** One-finger drag adjusts window/level instead of scrolling. */
+    val wlMode: Boolean = false,
     val zoom: Float = 1f,
     val pan: Offset = Offset.Zero,
     val skippedNote: String? = null,
@@ -61,6 +67,13 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
     private var prefetchJob: Job? = null
     private var lastShown = 0
 
+    /** Last slice drawn; source of file windows and the auto window. */
+    private var current: LoadedSlice? = null
+    /** Which of the file's windows "Default" is on (tapping Default again cycles). */
+    private var fileWindowIndex = 0
+    /** Span of modality values in the series' first slice, for W/L drag sensitivity. */
+    private var valueSpan = 4096.0
+
     /** What to draw. A StateFlow is conflated, so fast scrolling skips stale requests. */
     private data class RenderRequest(val seriesIndex: Int, val index: Int, val window: Window?, val generation: Int)
     private val request = MutableStateFlow<RenderRequest?>(null)
@@ -77,6 +90,7 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         prefetchJob?.cancel()
         generation++
         request.value = null
+        current = null
         cache.clear()
         _state.value = ViewerState(phase = ViewerState.Phase.Scanning)
         scanJob = viewModelScope.launch {
@@ -106,9 +120,11 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
     fun selectSeries(index: Int) {
         val s = series.getOrNull(index) ?: return
         generation++
+        current = null
+        fileWindowIndex = 0
         _state.update {
             it.copy(seriesIndex = index, targetIndex = 0, sliceIndex = 0, sliceCount = s.size, window = null,
-                image = null, zoom = 1f, pan = Offset.Zero)
+                presetName = null, presetNames = emptyList(), image = null, zoom = 1f, pan = Offset.Zero)
         }
         showSlice(0)
     }
@@ -133,23 +149,86 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
 
     fun resetView() = setTransform(1f, Offset.Zero)
 
+    /** Reset zoom/pan and return to the default window. */
+    fun resetAll() {
+        resetView()
+        fileWindowIndex = 0
+        applyPreset(_state.value.presetNames.firstOrNull() ?: Presets.AUTO)
+    }
+
+    fun toggleWlMode() = _state.update { it.copy(wlMode = !it.wlMode) }
+
+    fun applyPreset(name: String) {
+        val loaded = current ?: return
+        val window = when (name) {
+            Presets.DEFAULT -> {
+                if (loaded.fileWindows.isEmpty()) return
+                // Tapping Default while it's active cycles through the file's windows.
+                if (_state.value.presetName == Presets.DEFAULT) fileWindowIndex = (fileWindowIndex + 1) % loaded.fileWindows.size
+                loaded.fileWindows[fileWindowIndex.coerceIn(0, loaded.fileWindows.size - 1)]
+            }
+            Presets.AUTO -> autoWindow(loaded)
+            else -> Presets.ct.firstOrNull { it.label == name } ?: return
+        }
+        setWindow(window, name)
+    }
+
+    /**
+     * One-finger drag in W/L mode: right widens, up raises the level (image darker).
+     * A full-width drag spans the series' value range.
+     */
+    fun dragWindow(dx: Float, dy: Float, viewWidth: Float) {
+        val w = _state.value.window ?: return
+        val perPx = valueSpan / maxOf(viewWidth, 1f)
+        setWindow(Window(w.center - dy * perPx, maxOf(1.0, w.width + dx * perPx)), name = null)
+    }
+
+    private fun setWindow(window: Window, name: String?) {
+        _state.update { it.copy(window = window, presetName = name) }
+        val st = _state.value
+        request.value = RenderRequest(st.seriesIndex, st.targetIndex, window, generation)
+    }
+
+    private fun autoWindow(loaded: LoadedSlice): Window =
+        if (loaded.frame.gray != null) Voi.autoWindow(loaded.frame, loaded.rescale) else Window(127.5, 256.0)
+
     private suspend fun render(r: RenderRequest) {
         val s = series.getOrNull(r.seriesIndex) ?: return
         val slice = s.slices.getOrNull(r.index) ?: return
         try {
             val loaded = cache.get(slice)
             if (r.generation != generation) return
-            val window = r.window ?: _state.value.window ?: loaded.fileWindows.firstOrNull()
-                ?: if (loaded.frame.gray != null) Voi.autoWindow(loaded.frame, loaded.rescale) else Window(127.5, 256.0)
+            val first = current == null
+            current = loaded
+            var window = r.window ?: _state.value.window
+            var name = _state.value.presetName
+            if (window == null) { // first slice of a series: file default, else auto
+                window = loaded.fileWindows.firstOrNull() ?: autoWindow(loaded)
+                name = if (loaded.fileWindows.isNotEmpty()) Presets.DEFAULT else Presets.AUTO
+            }
+            if (first) {
+                valueSpan = withContext(Dispatchers.Default) { span(loaded) }
+                _state.update { it.copy(presetNames = Presets.labelsFor(s.modality, loaded.fileWindows.isNotEmpty())) }
+            }
             val bmp = withContext(Dispatchers.Default) { renderer.render(loaded.frame, loaded.rescale, window, userInvert = false) }
             if (r.generation != generation) return
-            _state.update { it.copy(sliceIndex = r.index, image = bmp.asImageBitmap(), window = window, error = null) }
-            prefetch(s, r.index, direction = if (r.index >= lastShown) 1 else -1)
+            _state.update {
+                it.copy(sliceIndex = r.index, image = bmp.asImageBitmap(), window = it.window ?: window,
+                    presetName = if (it.window == null) name else it.presetName, error = null)
+            }
+            if (r.index != lastShown) prefetch(s, r.index, direction = if (r.index > lastShown) 1 else -1)
+            else if (first) prefetch(s, r.index, 1)
             lastShown = r.index
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             _state.update { it.copy(sliceIndex = r.index, image = null, error = "Cannot display slice ${r.index + 1}: ${e.message}") }
         }
+    }
+
+    private fun span(loaded: LoadedSlice): Double {
+        if (loaded.frame.gray == null) return 256.0
+        val (lo, hi) = loaded.frame.storedRange().let { it[0] to it[1] }
+        return maxOf(kotlin.math.abs(loaded.rescale.apply(hi) - loaded.rescale.apply(lo)), 64.0)
     }
 
     /** Warm the cache around [center], favouring the direction of travel. */

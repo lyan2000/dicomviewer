@@ -27,8 +27,8 @@ import kotlin.math.roundToInt
 /**
  * Draws [image] fitted to the view, then scaled by [zoom] and offset by [pan] (px).
  *
- * Gestures: one-finger vertical drag scrolls slices (finger up = next), two fingers pinch-zoom
- * and pan, double-tap resets the view.
+ * Gestures: one-finger vertical drag scrolls slices (finger up = next), or in [wlMode] adjusts
+ * window/level; two fingers pinch-zoom and pan; double-tap resets the view.
  */
 @Composable
 fun ImageCanvas(
@@ -39,8 +39,12 @@ fun ImageCanvas(
     onScroll: (steps: Int) -> Unit,
     onTransform: (zoom: Float, pan: Offset) -> Unit,
     onResetView: () -> Unit,
+    wlMode: Boolean = false,
+    onWindowDrag: (dx: Float, dy: Float, viewWidth: Float) -> Unit = { _, _, _ -> },
     modifier: Modifier = Modifier,
 ) {
+    val wl by rememberUpdatedState(wlMode)
+    val windowDrag by rememberUpdatedState(onWindowDrag)
     val currentZoom by rememberUpdatedState(zoom)
     val currentPan by rememberUpdatedState(pan)
     val scroll by rememberUpdatedState(onScroll)
@@ -76,7 +80,11 @@ fun ImageCanvas(
                         } else if (mode != 2) {
                             val ch = pressed.first()
                             if (mode == 0 && (ch.position - down.position).getDistance() > viewConfiguration.touchSlop) mode = 1
-                            if (mode == 1) {
+                            if (mode == 1 && wl) {
+                                val d = ch.position - ch.previousPosition
+                                windowDrag(d.x, d.y, size.width.toFloat())
+                                ch.consume()
+                            } else if (mode == 1) {
                                 acc += ch.position.y - ch.previousPosition.y
                                 val steps = (-acc / pxPerSlice).toInt()
                                 if (steps != 0) {

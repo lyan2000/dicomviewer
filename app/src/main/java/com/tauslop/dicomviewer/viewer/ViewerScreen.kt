@@ -5,6 +5,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -14,9 +15,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -45,30 +49,57 @@ class ViewerActions(
     val onScroll: (Int) -> Unit,
     val onTransform: (Float, Offset) -> Unit,
     val onResetView: () -> Unit,
+    val onResetAll: () -> Unit,
+    val onToggleWl: () -> Unit,
+    val onPreset: (String) -> Unit,
+    val onWindowDrag: (Float, Float, Float) -> Unit,
 )
+
+private val Accent = Color(0xFF8AB4F8)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ViewerScreen(state: ViewerState, actions: ViewerActions) {
-    val onOpenFolder = actions.onOpenFolder
-    val onSelectSeries = actions.onSelectSeries
     var pickerOpen by remember { mutableStateOf(false) }
+    val ready = state.phase == ViewerState.Phase.Ready
 
     Scaffold(
         containerColor = Color.Black,
         topBar = {
-            TopAppBar(
-                title = { Text(statusText(state), style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                actions = {
-                    if (state.series.size > 1) TextButton(onClick = { pickerOpen = true }) { Text("Series") }
-                    TextButton(onClick = onOpenFolder) { Text("Open") }
-                },
-            )
+            Column {
+                TopAppBar(
+                    title = { Text(statusText(state), style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    actions = {
+                        if (ready) {
+                            TextButton(onClick = actions.onToggleWl) {
+                                Text("W/L", color = if (state.wlMode) Accent else Color.Gray)
+                            }
+                            TextButton(onClick = actions.onResetAll) { Text("Reset") }
+                        }
+                        if (state.series.size > 1) TextButton(onClick = { pickerOpen = true }) { Text("Series") }
+                        TextButton(onClick = actions.onOpenFolder) { Text("Open") }
+                    },
+                )
+                if (ready && state.presetNames.isNotEmpty()) {
+                    LazyRow(
+                        contentPadding = PaddingValues(horizontal = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        items(state.presetNames) { name ->
+                            FilterChip(
+                                selected = name == state.presetName,
+                                onClick = { actions.onPreset(name) },
+                                label = { Text(name) },
+                            )
+                        }
+                    }
+                }
+            }
         },
     ) { pad ->
         Box(Modifier.fillMaxSize().padding(pad).background(Color.Black), contentAlignment = Alignment.Center) {
             when (state.phase) {
-                ViewerState.Phase.Idle -> Button(onClick = onOpenFolder) { Text("Open folder") }
+                ViewerState.Phase.Idle -> Button(onClick = actions.onOpenFolder) { Text("Open folder") }
                 ViewerState.Phase.Scanning -> Column(Modifier.padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(if (state.scanTotal == 0) "Listing files…" else "Reading headers ${state.scanDone} / ${state.scanTotal}")
                     Spacer(Modifier.height(12.dp))
@@ -81,7 +112,7 @@ fun ViewerScreen(state: ViewerState, actions: ViewerActions) {
                     Text(state.error ?: "Error")
                     state.skippedNote?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                     Spacer(Modifier.height(12.dp))
-                    Button(onClick = onOpenFolder) { Text("Open another folder") }
+                    Button(onClick = actions.onOpenFolder) { Text("Open another folder") }
                 }
                 ViewerState.Phase.Ready -> Row(Modifier.fillMaxSize()) {
                     Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
@@ -93,8 +124,14 @@ fun ViewerScreen(state: ViewerState, actions: ViewerActions) {
                             onScroll = actions.onScroll,
                             onTransform = actions.onTransform,
                             onResetView = actions.onResetView,
+                            wlMode = state.wlMode,
+                            onWindowDrag = actions.onWindowDrag,
                         )
                         state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                        if (state.wlMode) {
+                            Text("W/L mode: drag ↔ width, ↕ level", style = MaterialTheme.typography.labelSmall, color = Accent,
+                                modifier = Modifier.align(Alignment.TopCenter).padding(8.dp))
+                        }
                         state.skippedNote?.let {
                             Text(it, style = MaterialTheme.typography.labelSmall, color = Color.Gray,
                                 modifier = Modifier.align(Alignment.BottomStart).padding(8.dp))
@@ -113,7 +150,7 @@ fun ViewerScreen(state: ViewerState, actions: ViewerActions) {
             LazyColumn {
                 itemsIndexed(state.series) { i, s ->
                     Column(
-                        Modifier.fillMaxWidth().clickable { pickerOpen = false; onSelectSeries(i) }
+                        Modifier.fillMaxWidth().clickable { pickerOpen = false; actions.onSelectSeries(i) }
                             .padding(horizontal = 24.dp, vertical = 12.dp),
                         verticalArrangement = Arrangement.spacedBy(2.dp),
                     ) {
@@ -130,5 +167,6 @@ fun ViewerScreen(state: ViewerState, actions: ViewerActions) {
 private fun statusText(s: ViewerState): String {
     if (s.phase != ViewerState.Phase.Ready || s.sliceCount == 0) return "DICOM Viewer"
     val w = s.window?.let { " · W ${it.width.roundToInt()} L ${it.center.roundToInt()}" } ?: ""
-    return "${s.sliceIndex + 1}/${s.sliceCount}$w"
+    val p = s.presetName?.let { " · $it" } ?: ""
+    return "${s.sliceIndex + 1}/${s.sliceCount}$w$p"
 }
