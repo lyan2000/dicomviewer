@@ -42,6 +42,8 @@ class VolumeRenderer {
     private var fbH = 0
     private var readBuf: ByteBuffer? = null
     private var texFromPatient = FloatArray(16)
+    /** One voxel of the uploaded texture, in texture coordinates. */
+    private var texel = floatArrayOf(0f, 0f, 0f)
     private val uniforms = HashMap<String, Int>()
     /** Last transfer function uploaded (by identity: adjusted curves keep the preset's name). */
     private var lastTf: TransferFunction? = null
@@ -76,7 +78,7 @@ class VolumeRenderer {
         max3dSize = v[0]
         program = link(Shaders.VERTEX, Shaders.FRAGMENT)
         for (name in listOf("u_vol", "u_tf", "u_texFromPatient", "u_origin00", "u_dOriginX", "u_dOriginY", "u_dir",
-            "u_step", "u_refStep", "u_huMin", "u_huMax", "u_tfSize", "u_stopAlpha")) {
+            "u_step", "u_refStep", "u_huMin", "u_huMax", "u_tfSize", "u_stopAlpha", "u_shade", "u_texel")) {
             uniforms[name] = GLES30.glGetUniformLocation(program, name)
         }
         val tex = IntArray(2)
@@ -124,11 +126,14 @@ class VolumeRenderer {
         GLES30.glFinish()
         // Strided texture covers the same physical box only approximately; fine for k·stride ≤ n.
         texFromPatient = RayGeometry.patientToTexture(vol)
+        texel = floatArrayOf(1f / nx, 1f / ny, 1f / nz)
         checkGl("upload")
     }
 
     /** Renders a [w]×[h] frame of the uploaded volume. */
-    suspend fun render(camera: OrbitCamera, tf: TransferFunction, w: Int, h: Int, stepMm: Double): Frame = withContext(gl) {
+    suspend fun render(
+        camera: OrbitCamera, tf: TransferFunction, w: Int, h: Int, stepMm: Double, shade: Boolean,
+    ): Frame = withContext(gl) {
         val start = SystemClock.elapsedRealtime()
         ensureTarget(w, h)
         if (tf !== lastTf) uploadTf(tf)
@@ -159,6 +164,8 @@ class VolumeRenderer {
         GLES30.glUniform1f(u("u_huMax"), TransferFunction.LUT_HU_MAX.toFloat())
         GLES30.glUniform1f(u("u_tfSize"), TransferFunction.LUT_SIZE.toFloat())
         GLES30.glUniform1f(u("u_stopAlpha"), 0.95f)
+        GLES30.glUniform1i(u("u_shade"), if (shade) 1 else 0)
+        GLES30.glUniform3f(u("u_texel"), texel[0], texel[1], texel[2])
         GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 0, 3)
 
         val buf = readBuf!!

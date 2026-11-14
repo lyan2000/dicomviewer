@@ -62,6 +62,7 @@ class ViewerActions(
     val onSwap: (MprView) -> Unit,
     val onSwap3D: () -> Unit,
     val onVrPreset: (String) -> Unit,
+    val onToggleShading: () -> Unit,
     val onRotate3D: (Float, Float, Float) -> Unit,
     val onTapImage: (Float, Float) -> Unit,
     val onTwist: (Float) -> Unit,
@@ -222,6 +223,10 @@ private fun ToolRow(state: ViewerState, actions: ViewerActions) {
     ) {
         tools.forEach { t ->
             FilterChip(selected = state.tool == t, onClick = { actions.onTool(t) }, label = { Text(t.label) })
+        }
+        // 3D-only, independent of the drag tool: lighting on/off.
+        state.mpr?.takeIf { it.threeDMain }?.let { m ->
+            FilterChip(selected = m.vr.shading, onClick = actions.onToggleShading, label = { Text("Shading") })
         }
         Spacer(Modifier.weight(1f))
         val hint = if (state.tool == Tool.SCROLL && state.mpr?.threeDMain == true) "drag to rotate" else toolHint(state.tool)

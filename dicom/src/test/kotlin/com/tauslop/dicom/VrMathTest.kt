@@ -104,6 +104,21 @@ class VrMathTest {
         assertEquals(0, lut[3].toInt())                         // transparent at -1024 HU
     }
 
+    @Test fun tissuesPresetColourBands() {
+        val tf = TransferFunction.TISSUES
+        val fat = tf.sample(-110.0)
+        assertTrue("fat yellow", fat[0] > fat[2] && fat[1] > fat[2] && fat[3] < 0.01f)
+        val soft = tf.sample(40.0)
+        assertTrue("soft tissue red, faint", soft[0] > 2 * soft[1] && soft[0] > 2 * soft[2] && soft[3] < 0.02f)
+        val disc = tf.sample(110.0)
+        assertTrue("disc blue", disc[2] > disc[0] && disc[2] > disc[1])
+        val spongy = tf.sample(320.0)
+        assertTrue("cancellous tan", spongy[0] > spongy[2] && spongy[3] > 0.3f)
+        val cortical = tf.sample(1500.0)
+        assertTrue("cortical white, opaque", cortical.take(3).all { it > 0.95f } && cortical[3] > 0.9f)
+        assertTrue(TransferFunction.PRESETS.contains(tf))
+    }
+
     @Test fun opacityCorrectionComposes() {
         val a = 0.4f
         assertEquals(a, TransferFunction.correctOpacity(a, TransferFunction.REFERENCE_STEP_MM), 1e-6f)

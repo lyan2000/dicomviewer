@@ -105,6 +105,7 @@ data class VrUi(
     val label: String,
     val presets: List<String> = TransferFunction.PRESETS.map { it.name },
     val presetName: String? = null,
+    val shading: Boolean = true,
 )
 
 data class SmallView(val view: MprView, val label: String, val image: ImageBitmap?, val lines: List<RefLine>)
@@ -163,8 +164,11 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
     private var threeDMain = false
     private var vrJob: Job? = null
     private data class VrReq(
-        val camera: OrbitCamera, val tf: TransferFunction, val w: Int, val h: Int, val stepMm: Double, val generation: Int,
+        val camera: OrbitCamera, val tf: TransferFunction, val w: Int, val h: Int, val stepMm: Double,
+        val shade: Boolean, val generation: Int,
     )
+    /** Gradient lighting on/off for the 3D view. */
+    private var vrShade = true
     /** True while the user is rotating/zooming the 3D view: render at half size, coarser steps. */
     private var vrFast = false
     private var vrIdleJob: Job? = null
@@ -549,8 +553,14 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
             .map { SmallView(it, m.label(it), smallImages[it], viewLines[it].orEmpty()) },
         oblique = !m.rotation.isIdentity,
         threeDMain = threeDMain,
-        vr = VrUi(vrImage, vrStatus, presetName = if (vrAdjusted) null else vrPreset.name),
+        vr = VrUi(vrImage, vrStatus, presetName = if (vrAdjusted) null else vrPreset.name, shading = vrShade),
     )
+
+    fun toggleVrShading() {
+        vrShade = !vrShade
+        publishMpr()
+        requestVr()
+    }
 
     private val vrTfLabel: String get() = if (vrAdjusted) "${vrPreset.name} (adjusted)" else vrPreset.name
 
@@ -623,7 +633,7 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         var side = if (threeDMain) viewSize.width.coerceIn(256, 720).takeIf { viewSize.width > 0 } ?: 512 else 384
         val fast = vrFast && threeDMain
         if (fast) side /= 2
-        vrRequest.value = VrReq(cam, vrTf, side, side, if (fast) 2.0 else 1.0, generation)
+        vrRequest.value = VrReq(cam, vrTf, side, side, if (fast) 2.0 else 1.0, vrShade, generation)
     }
 
     /** Low-quality frames while the camera moves; full quality 250 ms after the last change. */
@@ -654,7 +664,7 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun renderVr(r: VrReq) {
         try {
-            val f = vrRenderer.render(r.camera, r.tf, r.w, r.h, stepMm = r.stepMm)
+            val f = vrRenderer.render(r.camera, r.tf, r.w, r.h, stepMm = r.stepMm, shade = r.shade)
             if (r.generation != generation) return
             vrImage = f.bitmap.asImageBitmap()
             vrStatus = "3D · $vrTfLabel · ${f.millis} ms"

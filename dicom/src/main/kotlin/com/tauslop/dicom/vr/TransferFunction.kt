@@ -113,6 +113,28 @@ class TransferFunction(val name: String, points: List<TfPoint>) {
             p(1000.0, 1f, 1f, 0.95f, 0.90f),
         ))
 
-        val PRESETS = listOf(LUNG, BONE, SOFT_TISSUE, VESSELS)
+        /**
+         * Multi-tissue colouring by density band: fat yellow (almost clear), soft tissue/organs red
+         * (faint, ~1%/mm so deep structures show through), discs/cartilage blue (narrow
+         * ~80–140 HU band, so some flecks appear elsewhere), cancellous bone tan, cortical bone
+         * white. Organs of equal density (e.g. heart vs kidney) share a colour.
+         */
+        val TISSUES = TransferFunction("Tissues", listOf(
+            p(-250.0, 0.95f, 0.85f, 0.40f, 0f),
+            p(-110.0, 0.95f, 0.85f, 0.35f, 0.003f),   // fat
+            p(-50.0, 0.95f, 0.85f, 0.40f, 0.002f),
+            p(-15.0, 0.80f, 0.15f, 0.12f, 0f),
+            p(35.0, 0.82f, 0.16f, 0.12f, 0.012f),     // soft tissue / organs
+            p(65.0, 0.85f, 0.22f, 0.18f, 0.012f),
+            p(85.0, 0.45f, 0.65f, 0.95f, 0.06f),      // disc / cartilage
+            p(135.0, 0.50f, 0.72f, 1.00f, 0.07f),
+            p(175.0, 0.90f, 0.74f, 0.50f, 0.10f),
+            p(320.0, 0.90f, 0.76f, 0.52f, 0.35f),     // cancellous bone
+            p(650.0, 0.97f, 0.93f, 0.85f, 0.65f),
+            p(1200.0, 1f, 1f, 1f, 0.90f),             // cortical bone
+            p(3071.0, 1f, 1f, 1f, 1f),
+        ))
+
+        val PRESETS = listOf(LUNG, BONE, SOFT_TISSUE, TISSUES, VESSELS)
     }
 }

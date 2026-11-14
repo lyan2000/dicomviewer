@@ -32,6 +32,8 @@ uniform float u_huMin;
 uniform float u_huMax;
 uniform float u_tfSize;
 uniform float u_stopAlpha;
+uniform int u_shade;          // 1 = gradient (Blinn–Phong headlight) shading
+uniform vec3 u_texel;         // one voxel in texture coordinates, per axis
 
 out vec4 fragColor;
 
@@ -59,12 +61,35 @@ void main() {
     float t = tNear + u_step * hash(gl_FragCoord.xy);
     float tfScale = (u_tfSize - 1.0) / (u_huMax - u_huMin);
     float stepRatio = u_step / u_refStep;
+    // Gradients are taken in texture space; d(HU)/d(patient) = Mᵀ · d(HU)/d(tex).
+    mat3 gradToPatient = transpose(mat3(u_texFromPatient));
+    vec3 toCamera = -u_dir;
     for (int i = 0; i < 4096; i++) {
         if (t > tFar || acc.a > u_stopAlpha) break;
-        float hu = texture(u_vol, to + td * t).r;
+        vec3 p = to + td * t;
+        float hu = texture(u_vol, p).r;
         float idx = clamp((hu - u_huMin) * tfScale, 0.0, u_tfSize - 1.0);
         vec4 c = texture(u_tf, vec2((idx + 0.5) / u_tfSize, 0.5));
         float a = 1.0 - pow(1.0 - c.a, stepRatio);
+        if (u_shade == 1 && a > 0.004) {
+            // Central differences, only for visible samples (6 extra fetches).
+            vec3 g = vec3(
+                texture(u_vol, p + vec3(u_texel.x, 0.0, 0.0)).r - texture(u_vol, p - vec3(u_texel.x, 0.0, 0.0)).r,
+                texture(u_vol, p + vec3(0.0, u_texel.y, 0.0)).r - texture(u_vol, p - vec3(0.0, u_texel.y, 0.0)).r,
+                texture(u_vol, p + vec3(0.0, 0.0, u_texel.z)).r - texture(u_vol, p - vec3(0.0, 0.0, u_texel.z)).r
+            ) / (2.0 * u_texel);
+            vec3 gp = gradToPatient * g;          // HU per mm
+            float mag = length(gp);
+            if (mag > 1e-3) {
+                vec3 n = -gp / mag;               // surface normal points toward lower density
+                float ndl = abs(dot(n, toCamera)); // two-sided headlight
+                float lit = 0.35 + 0.65 * ndl;
+                float spec = 0.35 * pow(ndl, 24.0);
+                // Fade lighting in with gradient strength: flat regions have no real surface.
+                float k = smoothstep(15.0, 80.0, mag);
+                c.rgb = mix(c.rgb, c.rgb * lit + vec3(spec), k);
+            }
+        }
         acc.rgb += (1.0 - acc.a) * a * c.rgb;
         acc.a += (1.0 - acc.a) * a;
         t += u_step;
