@@ -10,6 +10,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.tauslop.dicom.Frame
 import com.tauslop.dicom.MprView
+import com.tauslop.dicom.Plane
 import com.tauslop.dicom.Reslicer
 import com.tauslop.dicom.Rotation
 import com.tauslop.dicom.Series
@@ -81,10 +82,18 @@ data class ViewerState(
 data class MprUi(
     val main: MprView,
     val mainLabel: String,
+    /** Reference lines for the main image, in its pixel coordinates. */
+    val mainLines: List<RefLine>,
     val small: List<SmallView>,
 )
 
-data class SmallView(val view: MprView, val label: String, val image: ImageBitmap?)
+data class SmallView(val view: MprView, val label: String, val image: ImageBitmap?, val lines: List<RefLine>)
+
+/**
+ * Where plane [of] cuts an image: the line through pixel ([u], [v]) (the cursor) with unit
+ * direction ([du], [dv]), in that image's pixel coordinates.
+ */
+data class RefLine(val of: MprView, val u: Float, val v: Float, val du: Float, val dv: Float)
 
 class ViewerViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -113,6 +122,8 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
 
     private var mpr: MprSession? = null
     private val smallImages = HashMap<MprView, ImageBitmap>()
+    /** Reference lines matching each view's last rendered image. */
+    private val viewLines = HashMap<MprView, List<RefLine>>()
     /** One renderer per view: each keeps a pixel buffer sized to its plane. */
     private val viewRenderers = MprView.entries.associateWith { FrameRenderer() }
 
@@ -227,6 +238,7 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         current = null
         mpr = null
         smallImages.clear()
+        viewLines.clear()
         fileWindowIndex = 0
         val start = startSlice.coerceIn(0, s.size - 1)
         _state.update {
@@ -323,7 +335,7 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         val m = mpr ?: return
         if (m.main == view) return
         m.main = view
-        _state.update { it.copy(zoom = 1f, pan = Offset.Zero, image = smallImages[view] ?: it.image) }
+        _state.update { it.copy(zoom = 1f, pan = Offset.Zero, image = smallImages[view] ?: it.image, mpr = mprUi(m)) }
         requestMpr()
     }
 
@@ -403,6 +415,7 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
             mainFrame = frame
             mainRescale = vol.rescale
             smallImages[r.main] = bmp
+            viewLines[r.main] = refLines(r.main, mainPlane, r)
             val d = Reslicer.depth(vol, r.rotation.apply(r.main.scroll), r.cursor)
             _state.update { it.copy(image = bmp, sliceIndex = d.index, sliceCount = d.count, error = null, mpr = mprUi(m)) }
 
@@ -415,6 +428,7 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 if (r.generation != generation) return
                 smallImages[v] = small
+                viewLines[v] = refLines(v, p, r)
             }
             _state.update { it.copy(mpr = mprUi(m)) }
         } catch (e: Exception) {
@@ -426,8 +440,29 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
     private fun mprUi(m: MprSession) = MprUi(
         main = m.main,
         mainLabel = m.label(m.main),
-        small = m.smallViews.map { SmallView(it, m.label(it), smallImages[it]) },
+        mainLines = viewLines[m.main].orEmpty(),
+        small = m.smallViews.map { SmallView(it, m.label(it), smallImages[it], viewLines[it].orEmpty()) },
     )
+
+    /** Lines where the other two planes cut [view]'s [plane], all through the cursor. */
+    private fun refLines(view: MprView, plane: Plane, r: MprReq): List<RefLine> {
+        val (u, v) = plane.pixelOf(r.cursor)
+        return MprView.entries.filter { it != view }.map { other ->
+            val dir = (plane.normal cross r.rotation.apply(other.scroll)).normalized()
+            val du = dir dot plane.right
+            val dv = dir dot plane.down
+            RefLine(other, u.toFloat(), v.toFloat(), du.toFloat(), dv.toFloat())
+        }
+    }
+
+    /** Single tap on the main image at pixel ([u], [v]): move the cursor there (depth unchanged). */
+    fun tapAt(u: Float, v: Float) {
+        val m = mpr ?: return
+        val plane = m.plane(m.main)
+        if (u < 0 || v < 0 || u > plane.width - 1 || v > plane.height - 1) return
+        m.cursor = plane.pointAt(u.toDouble(), v.toDouble())
+        requestMpr()
+    }
 
     // ---- stack rendering (fallback) ----------------------------------------
 

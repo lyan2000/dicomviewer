@@ -46,6 +46,7 @@ class MainActivity : ComponentActivity() {
                         onCancelScan = viewModel::cancelScan,
                         onViewSize = viewModel::onViewSize,
                         onSwap = viewModel::swapMain,
+                        onTapImage = viewModel::tapAt,
                     )
                 }
                 ViewerScreen(state, actions)

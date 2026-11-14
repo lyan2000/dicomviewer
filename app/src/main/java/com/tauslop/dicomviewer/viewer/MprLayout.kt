@@ -18,6 +18,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
@@ -77,6 +78,8 @@ private fun MainView(state: ViewerState, mpr: MprUi, actions: ViewerActions, siz
             onResetView = actions.onResetView,
             wlMode = state.wlMode,
             onWindowDrag = actions.onWindowDrag,
+            lines = mpr.mainLines,
+            onTap = actions.onTapImage,
         )
         Text(mpr.mainLabel, color = mpr.main.color(), style = MaterialTheme.typography.labelMedium,
             modifier = Modifier.align(Alignment.TopStart).padding(6.dp))
@@ -107,7 +110,7 @@ private fun SmallTile(v: SmallView, actions: ViewerActions, modifier: Modifier) 
     Box(
         modifier.padding(2.dp).border(1.dp, v.view.color()).clickable { actions.onSwap(v.view) }.padding(1.dp),
     ) {
-        v.image?.let { FittedImage(it) }
+        v.image?.let { FittedImage(it, v.lines) }
         Text(v.label, color = v.view.color(), style = MaterialTheme.typography.labelSmall,
             modifier = Modifier.align(Alignment.TopStart).padding(4.dp))
     }
@@ -120,20 +123,24 @@ private fun ThreeDPlaceholder(modifier: Modifier) {
     }
 }
 
-/** Draws [img] scaled to fit, centred, preserving aspect. */
+/** Draws [img] scaled to fit, centred, preserving aspect, with its reference lines. */
 @Composable
-private fun FittedImage(img: ImageBitmap) {
+private fun FittedImage(img: ImageBitmap, lines: List<RefLine>) {
     Canvas(Modifier.fillMaxSize().clipToBounds()) {
         val fit = min(size.width / img.width, size.height / img.height)
         val w = (img.width * fit).roundToInt()
         val h = (img.height * fit).roundToInt()
+        val left = ((size.width - w) / 2).roundToInt()
+        val top = ((size.height - h) / 2).roundToInt()
         drawImage(
             img,
             srcOffset = IntOffset.Zero,
             srcSize = IntSize(img.width, img.height),
-            dstOffset = IntOffset(((size.width - w) / 2).roundToInt(), ((size.height - h) / 2).roundToInt()),
+            dstOffset = IntOffset(left, top),
             dstSize = IntSize(w, h),
             filterQuality = FilterQuality.Low,
         )
+        drawRefLines(lines, img.width, img.height, Offset(left.toFloat(), top.toFloat()), fit,
+            strokePx = 1.dp.toPx(), gapPx = 5.dp.toPx())
     }
 }

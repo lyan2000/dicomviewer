@@ -60,6 +60,7 @@ class ViewerActions(
     val onCancelScan: () -> Unit,
     val onViewSize: (IntSize) -> Unit,
     val onSwap: (MprView) -> Unit,
+    val onTapImage: (Float, Float) -> Unit,
 )
 
 private val Accent = Color(0xFF8AB4F8)

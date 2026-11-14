@@ -42,7 +42,12 @@ fun ImageCanvas(
     modifier: Modifier = Modifier,
     wlMode: Boolean = false,
     onWindowDrag: (dx: Float, dy: Float, viewWidth: Float) -> Unit = { _, _, _ -> },
+    lines: List<RefLine> = emptyList(),
+    /** Single tap, in image pixel coordinates. Null disables tap handling. */
+    onTap: ((u: Float, v: Float) -> Unit)? = null,
 ) {
+    val currentImage by rememberUpdatedState(image)
+    val tap by rememberUpdatedState(onTap)
     val wl by rememberUpdatedState(wlMode)
     val windowDrag by rememberUpdatedState(onWindowDrag)
     val currentZoom by rememberUpdatedState(zoom)
@@ -54,7 +59,19 @@ fun ImageCanvas(
         modifier
             .fillMaxSize()
             .clipToBounds()
-            .pointerInput(Unit) { detectTapGestures(onDoubleTap = { onResetView() }) }
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onDoubleTap = { onResetView() },
+                    onTap = { pos ->
+                        val img = currentImage ?: return@detectTapGestures
+                        val cb = tap ?: return@detectTapGestures
+                        val fit = min(size.width.toFloat() / img.width, size.height.toFloat() / img.height) * currentZoom
+                        val topLeft = Offset(size.width / 2f, size.height / 2f) + currentPan -
+                            Offset(img.width * fit / 2f, img.height * fit / 2f)
+                        cb((pos.x - topLeft.x) / fit, (pos.y - topLeft.y) / fit)
+                    },
+                )
+            }
             .pointerInput(sliceCount) {
                 // Spread the stack over ~1 screen height, but never less than 5dp per slice.
                 val pxPerSlice = maxOf(size.height.toFloat() / maxOf(sliceCount, 1), 5.dp.toPx())
@@ -111,5 +128,8 @@ fun ImageCanvas(
             dstSize = IntSize(w.roundToInt(), h.roundToInt()),
             filterQuality = FilterQuality.Low,
         )
+        if (lines.isNotEmpty()) {
+            drawRefLines(lines, img.width, img.height, topLeft, fit, strokePx = 1.5.dp.toPx(), gapPx = 14.dp.toPx())
+        }
     }
 }
