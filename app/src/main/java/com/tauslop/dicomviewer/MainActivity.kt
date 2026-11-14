@@ -45,6 +45,7 @@ class MainActivity : ComponentActivity() {
                         onWindowDrag = viewModel::dragWindow,
                         onCancelScan = viewModel::cancelScan,
                         onViewSize = viewModel::onViewSize,
+                        onSwap = viewModel::swapMain,
                     )
                 }
                 ViewerScreen(state, actions)

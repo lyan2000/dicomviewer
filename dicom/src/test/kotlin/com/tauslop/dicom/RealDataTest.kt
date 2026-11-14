@@ -43,6 +43,43 @@ class RealDataTest {
         println("z ${z.first()} → ${z.last()}, spacing $mean mm")
     }
 
+    @Test fun lidcVolumeAndReslicing() {
+        val ct = scan().series.single()
+        val plan = (VolumeBuilder.plan(ct, Long.MAX_VALUE) as VolumeBuilder.Check.Ok).plan
+        val decoded = HashMap<Int, Frame>()
+        ct.slices.forEachIndexed { k, s ->
+            val f = DicomParser.parse(s.source)
+            val frame = PixelDecoder.decode(f, s.frame)
+            if (k in listOf(0, 66, 132)) decoded[k] = frame
+            plan.put(k, frame, Voi.rescale(f.dataset))
+        }
+        val vol = plan.finish()
+        println("volume ${vol.nx}x${vol.ny}x${vol.nz} spacing ${vol.dx}, ${vol.dy}, ${vol.dz} mm, ${vol.byteSize / 1_000_000} MB")
+        assertEquals(listOf(512, 512, 133), listOf(vol.nx, vol.ny, vol.nz))
+        assertEquals(2.5, vol.dz, 1e-3)
+
+        for ((k, frame) in decoded) {
+            val plane = Reslicer.planeFor(vol, MprView.AXIAL, vol.toPatient(0.0, 0.0, k.toDouble()))
+            val axial = Reslicer.sample(vol, plane)
+            assertEquals(512, axial.width); assertEquals(512, axial.height)
+            assertTrue("axial reslice differs from slice $k", (0 until 512 * 512).all { axial.stored(it) == frame.stored(it) })
+        }
+
+        val center = vol.center
+        val cor = Reslicer.planeFor(vol, MprView.CORONAL, center)
+        val expectedH = (132 * vol.dz / vol.dx).toInt() + 1
+        assertTrue("coronal ${cor.width}x${cor.height}, expected height ~$expectedH", kotlin.math.abs(cor.height - expectedH) <= 1)
+        val obl = Reslicer.planeFor(vol, MprView.CORONAL, center, Rotation.about(Vec3.X, Math.toRadians(30.0)))
+        fun time(p: Plane): Double {
+            repeat(3) { Reslicer.sample(vol, p) } // warm up the JIT
+            val t = System.nanoTime()
+            repeat(10) { Reslicer.sample(vol, p) }
+            return (System.nanoTime() - t) / 10 / 1e6
+        }
+        println("reslice coronal ${cor.width}x${cor.height}: ${"%.1f".format(time(cor))} ms; " +
+            "oblique 30° ${obl.width}x${obl.height}: ${"%.1f".format(time(obl))} ms (desktop JVM)")
+    }
+
     @Test fun lidcSlicesDecodeToPlausibleHu() {
         val ct = scan().series.single()
         for (s in ct.slices) {

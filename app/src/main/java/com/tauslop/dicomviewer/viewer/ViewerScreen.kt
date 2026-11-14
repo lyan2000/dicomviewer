@@ -42,6 +42,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import com.tauslop.dicom.MprView
 import kotlin.math.roundToInt
 
 /** UI callbacks, bundled so the screen signature stays stable as tools are added. */
@@ -58,6 +59,7 @@ class ViewerActions(
     val onWindowDrag: (Float, Float, Float) -> Unit,
     val onCancelScan: () -> Unit,
     val onViewSize: (IntSize) -> Unit,
+    val onSwap: (MprView) -> Unit,
 )
 
 private val Accent = Color(0xFF8AB4F8)
@@ -123,6 +125,16 @@ fun ViewerScreen(state: ViewerState, actions: ViewerActions) {
                     Spacer(Modifier.height(12.dp))
                     TextButton(onClick = actions.onCancelScan) { Text("Cancel") }
                 }
+                ViewerState.Phase.Building -> Column(Modifier.padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("Building volume ${state.scanDone} / ${state.scanTotal}")
+                    Spacer(Modifier.height(12.dp))
+                    LinearProgressIndicator(
+                        progress = { if (state.scanTotal == 0) 0f else state.scanDone.toFloat() / state.scanTotal },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    TextButton(onClick = actions.onCancelScan) { Text("Cancel") }
+                }
                 ViewerState.Phase.Error -> Column(Modifier.padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(state.error ?: "Error", textAlign = TextAlign.Center)
                     state.skippedNote?.let {
@@ -132,7 +144,9 @@ fun ViewerScreen(state: ViewerState, actions: ViewerActions) {
                     Spacer(Modifier.height(12.dp))
                     Button(onClick = actions.onOpenFolder) { Text("Open another folder") }
                 }
-                ViewerState.Phase.Ready -> Row(Modifier.fillMaxSize()) {
+                ViewerState.Phase.Ready -> if (state.mpr != null) {
+                    MprLayout(state, state.mpr, actions)
+                } else Row(Modifier.fillMaxSize()) {
                     Box(
                         Modifier.weight(1f).fillMaxHeight().onSizeChanged(actions.onViewSize),
                         contentAlignment = Alignment.Center,
@@ -153,7 +167,7 @@ fun ViewerScreen(state: ViewerState, actions: ViewerActions) {
                             Text("W/L mode: drag ↔ width, ↕ level", style = MaterialTheme.typography.labelSmall, color = Accent,
                                 modifier = Modifier.align(Alignment.TopCenter).padding(8.dp))
                         }
-                        state.skippedNote?.let {
+                        listOfNotNull(state.stackReason, state.skippedNote).joinToString("\n").takeIf { it.isNotEmpty() }?.let {
                             Text(it, style = MaterialTheme.typography.labelSmall, color = Color.Gray,
                                 modifier = Modifier.align(Alignment.BottomStart).padding(8.dp))
                         }
@@ -189,5 +203,6 @@ private fun statusText(s: ViewerState): String {
     if (s.phase != ViewerState.Phase.Ready || s.sliceCount == 0) return "DICOM Viewer"
     val w = s.window?.let { " · W ${it.width.roundToInt()} L ${it.center.roundToInt()}" } ?: ""
     val p = s.presetName?.let { " · $it" } ?: ""
-    return "${s.sliceIndex + 1}/${s.sliceCount}$w$p"
+    val view = s.mpr?.let { "${it.mainLabel} " } ?: ""
+    return "$view${s.sliceIndex + 1}/${s.sliceCount}$w$p"
 }
