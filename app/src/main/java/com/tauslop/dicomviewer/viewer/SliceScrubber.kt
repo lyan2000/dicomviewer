@@ -17,6 +17,9 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import kotlin.math.roundToInt
 
+/** Width of [SliceScrubber]; overlays keep this much clear along the right edge. */
+val ScrubberWidth = 36.dp
+
 /** Vertical scrubber: touch or drag anywhere along it to jump to that slice. */
 @Composable
 fun SliceScrubber(index: Int, count: Int, onSelect: (Int) -> Unit, modifier: Modifier = Modifier) {
@@ -25,7 +28,7 @@ fun SliceScrubber(index: Int, count: Int, onSelect: (Int) -> Unit, modifier: Mod
     Canvas(
         modifier
             .fillMaxHeight()
-            .width(36.dp)
+            .width(ScrubberWidth)
             .pointerInput(count) {
                 fun at(y: Float) {
                     val pad = inset.toPx()

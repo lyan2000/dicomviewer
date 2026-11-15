@@ -17,6 +17,8 @@ import com.tauslop.dicom.Series
 import com.tauslop.dicom.SkipReason
 import com.tauslop.dicom.Vec3
 import com.tauslop.dicom.Voi
+import com.tauslop.dicom.OverlayInfo
+import com.tauslop.dicom.SliceInfo
 import com.tauslop.dicom.VolumeBuilder
 import com.tauslop.dicom.Window
 import com.tauslop.dicomviewer.data.LoadedSlice
@@ -82,6 +84,10 @@ data class ViewerState(
     val mpr: MprUi? = null,
     /** Why this series is shown as a plain stack instead of MPR. */
     val stackReason: String? = null,
+    /** Patient/study/series text of the current series (corner overlay). */
+    val info: OverlayInfo? = null,
+    /** Acquisition text of the slice shown in stack mode (corner overlay). */
+    val sliceInfo: SliceInfo? = null,
 ) {
     enum class Phase { Idle, Scanning, Building, Ready, Error }
 }
@@ -98,6 +104,8 @@ data class MprUi(
     /** The 3D view occupies the main square (small row then shows all three planes). */
     val threeDMain: Boolean,
     val vr: VrUi,
+    /** Shared cursor, patient mm. */
+    val cursor: Vec3,
 )
 
 /**
@@ -114,6 +122,10 @@ data class VrUi(
     val shading: Boolean = true,
     /** The shared cursor on the 3D image (pixel coordinates of [image]). */
     val lines: List<RefLine> = emptyList(),
+    /** Mode and preset/window ("3D · Bone", "MIP · W 1500 L 300"), or progress/error text. */
+    val title: String = label,
+    /** Time of the last frame, null while uploading or after an error. */
+    val millis: Long? = null,
 )
 
 data class SmallView(val view: MprView, val label: String, val image: ImageBitmap?, val lines: List<RefLine>)
@@ -168,6 +180,8 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
     private val vrAdjusted: Boolean get() = vrTf !== vrPreset
     private var vrReady = false
     private var vrStatus = "3D"
+    /** Render time of [vrImage]; null while preparing/uploading or after an error. */
+    private var vrMillis: Long? = null
     private var vrImage: ImageBitmap? = null
     private var threeDMain = false
     private var vrJob: Job? = null
@@ -363,6 +377,7 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         vrShownCam = null
         pendingVr = null
         vrStatus = "3D"
+        vrMillis = null
         // Dispatched to the GL thread immediately (Main.immediate), so it runs before any later upload.
         viewModelScope.launch { runCatching { vrRenderer.freeVolume() } }
     }
@@ -390,7 +405,8 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         _state.update {
             it.copy(seriesIndex = index, targetIndex = start, sliceIndex = start, sliceCount = s.size, window = window,
                 presetName = if (window != null) presetName else null, presetNames = emptyList(), image = null,
-                zoom = 1f, pan = Offset.Zero, mpr = null, stackReason = null)
+                zoom = 1f, pan = Offset.Zero, mpr = null, stackReason = null,
+                info = OverlayInfo.from(s.slices.first().header), sliceInfo = null)
         }
         when (val check = VolumeBuilder.plan(s, (maxMemory * 0.4).toLong())) {
             is VolumeBuilder.Check.Rejected -> {
@@ -658,14 +674,19 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         oblique = !m.rotation.isIdentity,
         threeDMain = threeDMain,
         vr = vrUi(),
+        cursor = m.cursor,
     )
 
-    private fun vrUi(): VrUi = if (vrMode == RenderMode.VR) {
-        VrUi(vrImage, vrStatus, presetName = if (vrAdjusted) null else vrPreset.name, shading = vrShade,
-            lines = vrCursorLines())
-    } else {
-        VrUi(vrImage, vrStatus, mode = vrMode, presets = Projection.presets(vrMode).map { it.label!! },
-            presetName = projWindow.getValue(vrMode).label, shading = vrShade, lines = vrCursorLines())
+    private fun vrUi(): VrUi {
+        val title = if (vrMillis != null) vrLabel else vrStatus
+        return if (vrMode == RenderMode.VR) {
+            VrUi(vrImage, vrStatus, presetName = if (vrAdjusted) null else vrPreset.name, shading = vrShade,
+                lines = vrCursorLines(), title = title, millis = vrMillis)
+        } else {
+            VrUi(vrImage, vrStatus, mode = vrMode, presets = Projection.presets(vrMode).map { it.label!! },
+                presetName = projWindow.getValue(vrMode).label, shading = vrShade, lines = vrCursorLines(),
+                title = title, millis = vrMillis)
+        }
     }
 
     fun toggleVrShading() {
@@ -746,6 +767,7 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         vrReady = false
         vrImage = null
         vrStatus = "3D: preparing…"
+        vrMillis = null
         publishMpr()
         vrJob = viewModelScope.launch {
             try {
@@ -832,12 +854,14 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
             vrShownW = r.w
             vrShownH = r.h
             vrStatus = "$vrLabel · ${f.millis} ms"
+            vrMillis = f.millis
             publishMpr()
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             // A render queued before a series change may find its texture freed: ignore it.
             if (r.generation != generation) return
             vrStatus = "3D error: ${e.message ?: e.javaClass.simpleName}"
+            vrMillis = null
             publishMpr()
         }
     }
@@ -965,7 +989,8 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
             mainFrame = loaded.frame
             mainRescale = loaded.rescale
             _state.update {
-                it.copy(sliceIndex = r.index, image = bmp.asImageBitmap(), window = it.window ?: window,
+                it.copy(sliceIndex = r.index, image = bmp.asImageBitmap(), sliceInfo = SliceInfo.from(slice.header),
+                    window = it.window ?: window,
                     presetName = if (it.window == null) name else it.presetName, error = null)
             }
             if (r.index != lastShown) prefetch(s, r.index, direction = if (r.index > lastShown) 1 else -1)

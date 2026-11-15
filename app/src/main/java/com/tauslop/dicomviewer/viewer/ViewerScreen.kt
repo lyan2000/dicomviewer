@@ -46,7 +46,6 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.tauslop.dicom.MprView
 import com.tauslop.dicom.vr.RenderMode
-import kotlin.math.roundToInt
 
 /** UI callbacks, bundled so the screen signature stays stable as tools are added. */
 class ViewerActions(
@@ -197,11 +196,10 @@ fun ViewerScreen(state: ViewerState, actions: ViewerActions) {
                             tool = state.tool,
                             onWindowDrag = actions.onWindowDrag,
                         )
+                        // Corner text, including the "MPR unavailable" / skipped-files notes (bottom left).
+                        // The scrubber is beside this box, so no inset is needed.
+                        CornerOverlay(overlayFor(state))
                         state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                        listOfNotNull(state.stackReason, state.skippedNote).joinToString("\n").takeIf { it.isNotEmpty() }?.let {
-                            Text(it, style = MaterialTheme.typography.labelSmall, color = Color.Gray,
-                                modifier = Modifier.align(Alignment.BottomStart).padding(8.dp))
-                        }
                     }
                     if (state.sliceCount > 1) {
                         SliceScrubber(state.targetIndex, state.sliceCount, actions.onSelectSlice)
@@ -264,11 +262,6 @@ private fun toolHint(t: Tool): String = when (t) {
     Tool.OBLIQUE -> "drag around ✛ to tilt"
 }
 
-private fun statusText(s: ViewerState): String {
-    if (s.phase != ViewerState.Phase.Ready || s.sliceCount == 0) return "DICOM Viewer"
-    s.mpr?.takeIf { it.threeDMain }?.let { return it.vr.label } // 3D: preset and render time
-    val w = s.window?.let { " · W ${it.width.roundToInt()} L ${it.center.roundToInt()}" } ?: ""
-    val p = s.presetName?.let { " · $it" } ?: ""
-    val view = s.mpr?.let { "${it.mainLabel} " } ?: ""
-    return "$view${s.sliceIndex + 1}/${s.sliceCount}$w$p"
-}
+/** App bar title: the app name until an image is shown; then the corner overlay carries the status. */
+private fun statusText(s: ViewerState): String =
+    if (s.phase != ViewerState.Phase.Ready || s.sliceCount == 0) "DICOM Viewer" else ""

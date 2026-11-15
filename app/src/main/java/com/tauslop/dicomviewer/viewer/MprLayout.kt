@@ -90,16 +90,24 @@ private fun MainView(state: ViewerState, mpr: MprUi, actions: ViewerActions, siz
             cameraMode = is3d,
             onRotate = actions.onRotate3D,
         )
-        Text(if (is3d) mpr.vr.label else mpr.mainLabel, color = color, style = MaterialTheme.typography.labelMedium,
-            modifier = Modifier.align(Alignment.TopStart).padding(6.dp))
+        val scrubber = !is3d && state.sliceCount > 1
+        // Corner text sits under the scrubber and quick-view buttons (drawn after it) and clear of them.
+        CornerOverlay(
+            overlayFor(state),
+            endInset = if (scrubber) ScrubberWidth + 4.dp else 0.dp,
+            topEndInset = if (is3d) QuickViewsHeight else 0.dp,
+        )
         if (is3d) QuickViews(actions, Modifier.align(Alignment.TopEnd).padding(4.dp))
-        if (!is3d && state.sliceCount > 1) {
+        if (scrubber) {
             SliceScrubber(state.targetIndex, state.sliceCount, actions.onSelectSlice, Modifier.align(Alignment.CenterEnd))
         }
     }
 }
 
 private val ThreeDColor = Color(0xFFE0E0E0)
+
+/** Space the quick-view buttons take at the top right (4 dp padding + one labelMedium chip + gap). */
+private val QuickViewsHeight = 40.dp
 
 /** 3D main view: buttons that turn the camera to the axial, coronal or sagittal orientation. */
 @Composable
