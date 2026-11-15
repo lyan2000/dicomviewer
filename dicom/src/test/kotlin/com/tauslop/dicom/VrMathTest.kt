@@ -31,6 +31,32 @@ class VrMathTest {
         assertVec(cam.right, cam.forward cross cam.up)
     }
 
+    @Test fun quickViewsMatchMprAxes() {
+        val cam = OrbitCamera(Vec3.ZERO, 100.0).rotated(30f, 20f, 100f).zoomed(3.0).panned(5f, 5f, 100, 100)
+        for (v in MprView.entries) {
+            val c = cam.facing(v)
+            assertVec(v.right, c.right)
+            assertVec(-v.down, c.up)
+            assertVec(c.right, c.forward cross c.up) // still a proper rotation
+            assertEquals(1.0, c.zoom, 0.0); assertEquals(0.0, c.panX, 0.0); assertEquals(0.0, c.panY, 0.0)
+        }
+        assertTrue(cam.facing(MprView.CORONAL).rotation.isIdentity)
+        assertVec(-Vec3.X, cam.facing(MprView.SAGITTAL).forward) // from the patient's left
+        assertVec(Vec3.Z, cam.facing(MprView.AXIAL).forward)     // from the feet
+    }
+
+    @Test fun projectInvertsRay() {
+        val cam = OrbitCamera(Vec3(5.0, -3.0, 40.0), 250.0).rotated(41f, -17f, 300f).zoomed(1.7).panned(12f, -7f, 300, 200)
+        val (o, d) = cam.ray(73.0, 151.0, 300, 200)
+        for (depth in listOf(0.0, 100.0, 517.0)) { // any point on the ray lands on the same pixel
+            val (u, v) = cam.project(o + d * depth, 300, 200)
+            assertEquals(73.5, u, 1e-9); assertEquals(151.5, v, 1e-9)
+        }
+        // The target sits at the view centre when there is no pan.
+        val (cu, cv) = cam.copy(panX = 0.0, panY = 0.0).project(cam.target, 300, 200)
+        assertEquals(150.0, cu, 1e-9); assertEquals(100.0, cv, 1e-9)
+    }
+
     @Test fun dragDirections() {
         val cam = OrbitCamera(Vec3.ZERO, 100.0)
         // Half-view drag = 90°. Dragging right shows the patient's right side: camera looks toward +X.

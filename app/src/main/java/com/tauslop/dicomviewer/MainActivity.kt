@@ -48,6 +48,8 @@ class MainActivity : ComponentActivity() {
                         onSwap = viewModel::swapMain,
                         onSwap3D = viewModel::swapTo3D,
                         onVrPreset = viewModel::applyVrPreset,
+                        onVrMode = viewModel::setVrMode,
+                        onView3D = viewModel::view3D,
                         onToggleShading = viewModel::toggleVrShading,
                         onRotate3D = viewModel::rotate3D,
                         onTapImage = viewModel::tapAt,

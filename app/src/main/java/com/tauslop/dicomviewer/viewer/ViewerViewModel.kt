@@ -29,7 +29,10 @@ import com.tauslop.dicomviewer.mpr.MprSession
 import com.tauslop.dicomviewer.render.FrameRenderer
 import com.tauslop.dicomviewer.vr.VolumeRenderer
 import com.tauslop.dicom.vr.OrbitCamera
+import com.tauslop.dicom.vr.Projection
+import com.tauslop.dicom.vr.RenderMode
 import com.tauslop.dicom.vr.TransferFunction
+import com.tauslop.dicom.vr.VrPlace
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -46,6 +49,7 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.roundToInt
 
 data class SeriesSummary(val label: String, val detail: String, val count: Int)
 
@@ -97,15 +101,19 @@ data class MprUi(
 )
 
 /**
- * 3D view: latest rendered image, a status label (preset, render time, or progress), the 3D
- * preset names for the chip row, and the selected one (null once the curve is adjusted by W/L).
+ * 3D view: latest rendered image, a status label (preset or window, render time, or progress),
+ * the render mode, the presets that fit that mode for the chip row, and the selected one (null
+ * once the curve or window is adjusted by W/L).
  */
 data class VrUi(
     val image: ImageBitmap?,
     val label: String,
+    val mode: RenderMode = RenderMode.VR,
     val presets: List<String> = TransferFunction.PRESETS.map { it.name },
     val presetName: String? = null,
     val shading: Boolean = true,
+    /** The shared cursor on the 3D image (pixel coordinates of [image]). */
+    val lines: List<RefLine> = emptyList(),
 )
 
 data class SmallView(val view: MprView, val label: String, val image: ImageBitmap?, val lines: List<RefLine>)
@@ -165,10 +173,30 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
     private var vrJob: Job? = null
     private data class VrReq(
         val camera: OrbitCamera, val tf: TransferFunction, val w: Int, val h: Int, val stepMm: Double,
-        val shade: Boolean, val generation: Int,
+        val shade: Boolean, val mode: RenderMode, val window: Window?, val generation: Int,
     )
     /** Gradient lighting on/off for the 3D view. */
     private var vrShade = true
+    /** VR, MIP or MinIP. */
+    private var vrMode = RenderMode.VR
+    /**
+     * MIP/MinIP grey windows, separate from the MPR window and the VR curve. The label is the
+     * preset name, null once dragged; [projBase] is the preset the window came from (for Reset).
+     */
+    private val projWindow = HashMap<RenderMode, Window>()
+    private val projBase = HashMap<RenderMode, Window>()
+    init {
+        for (m in listOf(RenderMode.MIP, RenderMode.MINIP)) {
+            projWindow[m] = Projection.defaultWindow(m)
+            projBase[m] = Projection.defaultWindow(m)
+        }
+    }
+    /** Camera and size of the frame in [vrImage]: taps and the cursor overlay use these. */
+    private var vrShownCam: OrbitCamera? = null
+    private var vrShownW = 0
+    private var vrShownH = 0
+    /** Saved 3D camera waiting for the volume upload (session restore). */
+    private var pendingVr: VrPlace? = null
     /** True while the user is rotating/zooming the 3D view: render at half size, coarser steps. */
     private var vrFast = false
     private var vrIdleJob: Job? = null
@@ -231,6 +259,7 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         request.value = null
         current = null
         mpr = null
+        dropVolume()
         series = emptyList()
         cache.clear()
         this.tree = tree
@@ -249,8 +278,9 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 _state.update { it.copy(series = series.map(::summary), skippedNote = note) }
                 val idx = restore?.seriesUid?.let { uid -> series.indexOfFirst { it.seriesUid == uid } } ?: -1
-                if (restore != null && idx >= 0) selectSeries(idx, restore.sliceIndex, restore.window, restore.presetName, restore.mpr)
-                else selectSeries(0)
+                if (restore != null && idx >= 0) {
+                    selectSeries(idx, restore.sliceIndex, restore.window, restore.presetName, restore.mpr, restore.vr)
+                } else selectSeries(0)
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 val msg = when (e) {
@@ -266,6 +296,9 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
     fun cancelScan() {
         scanJob?.cancel()
         buildJob?.cancel()
+        generation++
+        mpr = null
+        dropVolume()
         tree = null
         _state.value = ViewerState(notice = "Cancelled.")
     }
@@ -276,14 +309,72 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         val st = _state.value
         val slice = mpr?.let { it.depth(MprView.AXIAL).index } ?: st.targetIndex
         val place = mpr?.let { MprPlace(it.main, it.cursor, it.rotation) }
-        sessions.save(Session(t, series.getOrNull(st.seriesIndex)?.seriesUid, slice, st.window, st.presetName, place))
+        sessions.save(Session(t, series.getOrNull(st.seriesIndex)?.seriesUid, slice, st.window, st.presetName, place, vrPlace()))
+    }
+
+    /** Current 3D settings; while the volume uploads, the camera still waiting to be restored. */
+    private fun vrPlace(): VrPlace {
+        val cam = vrCamera
+        val p = pendingVr
+        val tfWindow = if (vrAdjusted) vrTf.visibleRange.let { Window((it.start + it.endInclusive) / 2, it.endInclusive - it.start) } else null
+        return VrPlace(
+            rotation = cam?.rotation ?: p?.rotation ?: com.tauslop.dicom.Rotation.IDENTITY,
+            zoom = cam?.zoom ?: p?.zoom ?: 1.0,
+            panX = cam?.panX ?: p?.panX ?: 0.0,
+            panY = cam?.panY ?: p?.panY ?: 0.0,
+            mode = vrMode,
+            preset = vrPreset.name,
+            tfWindow = tfWindow,
+            mipWindow = projWindow.getValue(RenderMode.MIP),
+            minipWindow = projWindow.getValue(RenderMode.MINIP),
+            shading = vrShade,
+            // Still building the volume: keep the saved choice.
+            threeDMain = threeDMain || (mpr == null && p?.threeDMain == true),
+        )
+    }
+
+    /** Restores the 3D settings that don't need a volume (preset, curve, mode, windows, shading). */
+    private fun applyVrSettings(p: VrPlace) {
+        val preset = TransferFunction.PRESETS.firstOrNull { it.name == p.preset } ?: TransferFunction.BONE
+        vrPreset = preset
+        vrTf = p.tfWindow?.let { preset.windowed(it.center, it.width) } ?: preset
+        vrMode = p.mode
+        vrShade = p.shading
+        for ((m, w) in listOf(RenderMode.MIP to p.mipWindow, RenderMode.MINIP to p.minipWindow)) {
+            projWindow[m] = w
+            projBase[m] = Projection.presets(m).firstOrNull { it.label == w.label } ?: Projection.defaultWindow(m)
+        }
+    }
+
+    /**
+     * Forgets the 3D view of the current series and frees its GPU texture. The free is queued on
+     * the GL thread behind any render/upload already running, and renders after it are refused
+     * until the next upload, so nothing samples a freed texture.
+     */
+    private fun dropVolume() {
+        vrJob?.cancel()
+        vrIdleJob?.cancel()
+        vrFast = false
+        vrRequest.value = null
+        threeDMain = false
+        vrReady = false
+        vrImage = null
+        vrCamera = null
+        vrShownCam = null
+        pendingVr = null
+        vrStatus = "3D"
+        // Dispatched to the GL thread immediately (Main.immediate), so it runs before any later upload.
+        viewModelScope.launch { runCatching { vrRenderer.freeVolume() } }
     }
 
     // ---- series / volume ---------------------------------------------------
 
-    fun selectSeries(index: Int) = selectSeries(index, 0, null, null, null)
+    /** A newly chosen series opens on its first slice (stack) or with the cursor at the volume centre (MPR/3D). */
+    fun selectSeries(index: Int) = selectSeries(index, null, null, null, null, null)
 
-    private fun selectSeries(index: Int, startSlice: Int, window: Window?, presetName: String?, place: MprPlace?) {
+    private fun selectSeries(
+        index: Int, startSlice: Int?, window: Window?, presetName: String?, place: MprPlace?, vrPlace: VrPlace?,
+    ) {
         val s = series.getOrNull(index) ?: return
         buildJob?.cancel()
         prefetchJob?.cancel()
@@ -292,13 +383,10 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         mpr = null
         smallImages.clear()
         viewLines.clear()
-        vrJob?.cancel()
-        threeDMain = false
-        vrReady = false
-        vrImage = null
-        vrCamera = null
+        dropVolume()
+        if (vrPlace != null) { applyVrSettings(vrPlace); pendingVr = vrPlace }
         fileWindowIndex = 0
-        val start = startSlice.coerceIn(0, s.size - 1)
+        val start = (startSlice ?: 0).coerceIn(0, s.size - 1)
         _state.update {
             it.copy(seriesIndex = index, targetIndex = start, sliceIndex = start, sliceCount = s.size, window = window,
                 presetName = if (window != null) presetName else null, presetNames = emptyList(), image = null,
@@ -309,11 +397,12 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
                 _state.update { it.copy(phase = ViewerState.Phase.Ready, stackReason = "MPR unavailable: ${check.reason}") }
                 showSlice(start)
             }
-            is VolumeBuilder.Check.Ok -> buildVolume(s, check.plan, start, place)
+            is VolumeBuilder.Check.Ok -> buildVolume(s, check.plan, startSlice?.coerceIn(0, s.size - 1), place)
         }
     }
 
-    private fun buildVolume(s: Series<Uri>, plan: VolumeBuilder.Plan, startSlice: Int, place: MprPlace?) {
+    /** [startSlice] null: keep the cursor at the volume centre. */
+    private fun buildVolume(s: Series<Uri>, plan: VolumeBuilder.Plan, startSlice: Int?, place: MprPlace?) {
         val gen = generation
         _state.update { it.copy(phase = ViewerState.Phase.Building, scanDone = 0, scanTotal = s.size) }
         buildJob = viewModelScope.launch {
@@ -342,11 +431,13 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
                     maxOf((vol.maxValue - vol.minValue) * kotlin.math.abs(vol.rescale.slope), 64.0)
                 }
                 val session = MprSession(vol).apply {
-                    goTo(MprView.AXIAL, startSlice)
+                    if (startSlice != null) goTo(MprView.AXIAL, startSlice)
                     // Restore view, cursor and plane tilt if they were saved for this series.
                     if (place != null) { main = place.main; cursor = place.cursor; rotation = place.rotation }
                 }
                 mpr = session
+                // 3D in the main square, if saved; its camera is restored once the upload is done.
+                threeDMain = pendingVr?.threeDMain == true
                 val st = _state.value
                 val window = st.window ?: first.fileWindows.firstOrNull() ?: autoWindow(first.frame, first.rescale)
                 val name = if (st.window != null) st.presetName
@@ -363,7 +454,7 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
                 _state.update {
                     it.copy(phase = ViewerState.Phase.Ready, stackReason = "MPR unavailable: ${e.message ?: e.javaClass.simpleName}")
                 }
-                showSlice(startSlice)
+                showSlice(startSlice ?: 0)
             }
         }
     }
@@ -444,10 +535,23 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(zoom = 1f, pan = Offset.Zero) }
     }
 
+    /** 3D quick view: turn the camera to face the volume like MPR [view], fitted. */
+    fun view3D(view: MprView) {
+        val cam = vrCamera ?: return
+        if (!threeDMain) return
+        vrCamera = cam.facing(view)
+        _state.update { it.copy(zoom = 1f, pan = Offset.Zero) }
+        requestVr()
+    }
+
     /** Reset zoom/pan and return to the default window (in 3D: coronal camera, unadjusted preset). */
     fun resetAll() {
         resetView()
-        if (threeDMain) { applyVrPreset(vrPreset.name); return }
+        if (threeDMain) {
+            // VR: the unadjusted preset; MIP/MinIP: the preset the window came from.
+            applyVrPreset(if (vrMode == RenderMode.VR) vrPreset.name else projBase.getValue(vrMode).label!!)
+            return
+        }
         fileWindowIndex = 0
         applyPreset(_state.value.presetNames.firstOrNull() ?: Presets.AUTO)
     }
@@ -547,14 +651,22 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
     private fun mprUi(m: MprSession) = MprUi(
         main = m.main,
         mainLabel = if (threeDMain) "3D" else m.label(m.main),
-        mainLines = viewLines[m.main].orEmpty(),
+        mainLines = if (threeDMain) vrCursorLines() else viewLines[m.main].orEmpty(),
         // With 3D in the main square, all three planes go in the small row.
         small = (if (threeDMain) MprView.entries else m.smallViews)
             .map { SmallView(it, m.label(it), smallImages[it], viewLines[it].orEmpty()) },
         oblique = !m.rotation.isIdentity,
         threeDMain = threeDMain,
-        vr = VrUi(vrImage, vrStatus, presetName = if (vrAdjusted) null else vrPreset.name, shading = vrShade),
+        vr = vrUi(),
     )
+
+    private fun vrUi(): VrUi = if (vrMode == RenderMode.VR) {
+        VrUi(vrImage, vrStatus, presetName = if (vrAdjusted) null else vrPreset.name, shading = vrShade,
+            lines = vrCursorLines())
+    } else {
+        VrUi(vrImage, vrStatus, mode = vrMode, presets = Projection.presets(vrMode).map { it.label!! },
+            presetName = projWindow.getValue(vrMode).label, shading = vrShade, lines = vrCursorLines())
+    }
 
     fun toggleVrShading() {
         vrShade = !vrShade
@@ -562,26 +674,59 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         requestVr()
     }
 
-    private val vrTfLabel: String get() = if (vrAdjusted) "${vrPreset.name} (adjusted)" else vrPreset.name
+    /** Switch between volume rendering, MIP and MinIP. */
+    fun setVrMode(mode: RenderMode) {
+        if (mode == vrMode) return
+        vrMode = mode
+        if (vrReady) vrStatus = vrLabel
+        publishMpr()
+        requestVr()
+    }
 
-    /** Select a 3D preset (discarding any W/L adjustment). */
+    /** "3D · Bone", "3D · Bone (adjusted)", "MIP · W 1500 L 300". */
+    private val vrLabel: String get() = when (vrMode) {
+        RenderMode.VR -> "3D · " + if (vrAdjusted) "${vrPreset.name} (adjusted)" else vrPreset.name
+        else -> projWindow.getValue(vrMode).let { w ->
+            "${vrMode.label} · W ${w.width.roundToInt()} L ${w.center.roundToInt()}"
+        }
+    }
+
+    /**
+     * Select a preset of the current 3D mode: a VR curve (discarding any W/L adjustment) or a
+     * MIP/MinIP window.
+     */
     fun applyVrPreset(name: String) {
-        val tf = TransferFunction.PRESETS.firstOrNull { it.name == name } ?: return
-        vrPreset = tf
-        vrTf = tf
+        if (vrMode == RenderMode.VR) {
+            val tf = TransferFunction.PRESETS.firstOrNull { it.name == name } ?: return
+            vrPreset = tf
+            vrTf = tf
+        } else {
+            val w = Projection.presets(vrMode).firstOrNull { it.label == name } ?: return
+            projWindow[vrMode] = w
+            projBase[vrMode] = w
+        }
         publishMpr()
         requestVr()
     }
 
     /**
-     * W/L drag with 3D in the main view: shift (vertical; up = denser tissue only) and stretch
-     * (horizontal; right = wider) the active curve's visible HU range. MPR windows are untouched.
+     * W/L drag with 3D in the main view. VR: shift (vertical; up = denser tissue only) and stretch
+     * (horizontal; right = wider) the active curve's visible HU range. MIP/MinIP: move that mode's
+     * grey window like the MPR W/L (right widens, up raises the level). MPR windows are untouched.
      */
     private fun dragVrWindow(dx: Float, dy: Float, viewWidth: Float) {
+        val perPx = 4096.0 / maxOf(viewWidth, 1f) // a full-width drag spans the CT range
+        if (vrMode != RenderMode.VR) {
+            val w = projWindow.getValue(vrMode)
+            projWindow[vrMode] = Window(w.center - dy * perPx, maxOf(1.0, w.width + dx * perPx))
+            markVrInteracting()
+            publishMpr()
+            requestVr()
+            return
+        }
         val r = vrTf.visibleRange
         val c = (r.start + r.endInclusive) / 2
         val w = r.endInclusive - r.start
-        val perPx = 4096.0 / maxOf(viewWidth, 1f) // a full-width drag spans the CT range
         vrTf = vrPreset.windowed(c - dy * perPx, maxOf(10.0, w + dx * perPx))
         markVrInteracting()
         publishMpr()
@@ -606,17 +751,31 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 vrRenderer.init()
                 vrRenderer.upload(vol) { p ->
-                    vrStatus = "3D: uploading ${(p * 100).toInt()}%"
-                    viewModelScope.launch { if (gen == generation) publishMpr() }
+                    // Called on the GL thread: touch state on the main thread only.
+                    viewModelScope.launch {
+                        if (gen == generation && !vrReady) {
+                            vrStatus = "3D: uploading ${(p * 100).toInt()}%"
+                            publishMpr()
+                        }
+                    }
                 }
                 if (gen != generation) return@launch
-                vrCamera = OrbitCamera.forVolume(vol)
+                // Restore the saved orbit/zoom/pan (target and field always come from the volume).
+                val p = pendingVr
+                pendingVr = null
+                val cam = OrbitCamera.forVolume(vol).let {
+                    if (p == null) it else it.copy(rotation = p.rotation, zoom = p.zoom, panX = p.panX, panY = p.panY)
+                }
+                vrCamera = cam
                 vrReady = true
-                vrStatus = "3D · $vrTfLabel"
+                vrStatus = vrLabel
+                // 3D already main (restored): gesture state mirrors the camera.
+                if (threeDMain) _state.update { it.copy(zoom = cam.zoom.toFloat(), pan = cameraPanPx(cam)) }
                 publishMpr()
                 requestVr()
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
+                if (gen != generation) return@launch
                 vrStatus = "3D unavailable: ${e.message ?: e.javaClass.simpleName}"
                 publishMpr()
             }
@@ -633,7 +792,8 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         var side = if (threeDMain) viewSize.width.coerceIn(256, 720).takeIf { viewSize.width > 0 } ?: 512 else 384
         val fast = vrFast && threeDMain
         if (fast) side /= 2
-        vrRequest.value = VrReq(cam, vrTf, side, side, if (fast) 2.0 else 1.0, vrShade, generation)
+        vrRequest.value = VrReq(cam, vrTf, side, side, if (fast) 2.0 else 1.0, vrShade, vrMode,
+            projWindow[vrMode], generation)
     }
 
     /** Low-quality frames while the camera moves; full quality 250 ms after the last change. */
@@ -664,13 +824,19 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun renderVr(r: VrReq) {
         try {
-            val f = vrRenderer.render(r.camera, r.tf, r.w, r.h, stepMm = r.stepMm, shade = r.shade)
+            val f = vrRenderer.render(r.camera, r.tf, r.w, r.h, stepMm = r.stepMm, shade = r.shade,
+                mode = r.mode, window = r.window)
             if (r.generation != generation) return
             vrImage = f.bitmap.asImageBitmap()
-            vrStatus = "3D · $vrTfLabel · ${f.millis} ms"
+            vrShownCam = r.camera
+            vrShownW = r.w
+            vrShownH = r.h
+            vrStatus = "$vrLabel · ${f.millis} ms"
             publishMpr()
         } catch (e: Exception) {
             if (e is CancellationException) throw e
+            // A render queued before a series change may find its texture freed: ignore it.
+            if (r.generation != generation) return
             vrStatus = "3D error: ${e.message ?: e.javaClass.simpleName}"
             publishMpr()
         }
@@ -720,9 +886,53 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Single tap on the main image at pixel ([u], [v]): move the cursor there (depth unchanged). */
+    /**
+     * The shared cursor on the shown 3D frame, drawn like MPR reference lines: for each plane, the
+     * line where it cuts the screen-facing plane through the cursor (so the coronal 3D view
+     * matches coronal MPR). A plane seen face-on has no line.
+     */
+    private fun vrCursorLines(): List<RefLine> {
+        val m = mpr ?: return emptyList()
+        val cam = vrShownCam ?: return emptyList()
+        val (u, v) = cam.project(m.cursor, vrShownW, vrShownH)
+        return MprView.entries.mapNotNull { view ->
+            val dir = m.scrollDir(view) cross cam.forward
+            val du = dir dot cam.right
+            val dv = -(dir dot cam.up)
+            val len = kotlin.math.hypot(du, dv)
+            if (len < 0.1) null else RefLine(view, u.toFloat(), v.toFloat(), (du / len).toFloat(), (dv / len).toFloat())
+        }
+    }
+
+    /**
+     * Tap on the 3D main view at ([u], [v]) in pixels of the shown frame: move the cursor to the
+     * point along that ray the image shows there (VR: the visible surface; MIP: the brightest
+     * sample; MinIP: the darkest hole). Nothing happens on empty space.
+     */
+    private fun tap3D(u: Float, v: Float) {
+        val m = mpr ?: return
+        val cam = vrShownCam ?: return
+        val w = vrShownW
+        val h = vrShownH
+        if (u < 0 || v < 0 || u > w || v > h) return
+        val gen = generation
+        val mode = vrMode
+        val tf = vrTf
+        viewModelScope.launch {
+            val p = withContext(Dispatchers.Default) {
+                val (o, d) = cam.ray(u - 0.5, v - 0.5, w, h)
+                Projection.pick(m.volume, mode, tf, o, d, stepMm = 0.5)
+            } ?: return@launch
+            if (gen != generation || mpr !== m) return@launch
+            m.cursor = p
+            requestMpr()
+            publishMpr()
+        }
+    }
+
+    /** Single tap on the main image at pixel ([u], [v]): move the cursor there (depth unchanged; 3D: picked depth). */
     fun tapAt(u: Float, v: Float) {
-        if (threeDMain) return
+        if (threeDMain) { tap3D(u, v); return }
         val m = mpr ?: return
         val plane = m.plane(m.main)
         if (u < 0 || v < 0 || u > plane.width - 1 || v > plane.height - 1) return
@@ -810,10 +1020,15 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         cache.close()
-        // viewModelScope is already cancelled here; free GL resources on their own thread.
+        // viewModelScope is already cancelled here (an upload in flight stops at its next slice).
+        // Free the texture, render target and context on the GL thread, behind any queued work,
+        // then stop that thread.
         kotlinx.coroutines.CoroutineScope(Dispatchers.Default).launch {
-            runCatching { vrRenderer.release() }
-            vrRenderer.shutdown()
+            try {
+                runCatching { vrRenderer.release() }
+            } finally {
+                vrRenderer.shutdown()
+            }
         }
     }
 

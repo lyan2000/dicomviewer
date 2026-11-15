@@ -93,7 +93,8 @@ fun ImageCanvas(
                     onTap = { pos ->
                         val img = currentImage ?: return@detectTapGestures
                         val cb = tap ?: return@detectTapGestures
-                        val (fit, topLeft) = layout(size.width.toFloat(), size.height.toFloat(), img)
+                        val (fit, topLeft) = if (camMode) fitted(size.width.toFloat(), size.height.toFloat(), img)
+                            else layout(size.width.toFloat(), size.height.toFloat(), img)
                         cb((pos.x - topLeft.x) / fit, (pos.y - topLeft.y) / fit)
                     },
                 )
@@ -175,11 +176,8 @@ fun ImageCanvas(
             },
     ) {
         val img = image ?: return@Canvas
-        val (fit, topLeft) = if (cameraMode) {
-            // Already zoomed/panned by the renderer: just fit it.
-            val f = min(size.width / img.width, size.height / img.height)
-            f to Offset((size.width - img.width * f) / 2f, (size.height - img.height * f) / 2f)
-        } else layout(size.width, size.height, img)
+        // Camera mode: already zoomed/panned by the renderer, just fit it.
+        val (fit, topLeft) = if (cameraMode) fitted(size.width, size.height, img) else layout(size.width, size.height, img)
         drawImage(
             img,
             srcOffset = IntOffset.Zero,
@@ -192,4 +190,10 @@ fun ImageCanvas(
             drawRefLines(lines, img.width, img.height, topLeft, fit, strokePx = 1.5.dp.toPx(), gapPx = 14.dp.toPx())
         }
     }
+}
+
+/** Scale and top-left that fit [img] in a [w]×[h] canvas, centred (no zoom/pan). */
+private fun fitted(w: Float, h: Float, img: ImageBitmap): Pair<Float, Offset> {
+    val f = min(w / img.width, h / img.height)
+    return f to Offset((w - img.width * f) / 2f, (h - img.height * f) / 2f)
 }

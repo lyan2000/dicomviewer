@@ -12,7 +12,10 @@ void main() {
 """
 
     /**
-     * Orthographic ray casting with front-to-back compositing.
+     * Orthographic ray casting. u_mode 0: front-to-back compositing through the transfer function
+     * (VR); 1: maximum intensity (MIP); 2: minimum intensity inside the body (MinIP), both shown
+     * through a linear grey window [u_winLo, u_winHi] HU. MIP/MinIP mirror
+     * com.tauslop.dicom.vr.Projection.project.
      * Framebuffer row y holds image row y (top row first), so glReadPixels yields a top-down image.
      */
     const val FRAGMENT = """#version 300 es
@@ -34,6 +37,11 @@ uniform float u_tfSize;
 uniform float u_stopAlpha;
 uniform int u_shade;          // 1 = gradient (Blinn–Phong headlight) shading
 uniform vec3 u_texel;         // one voxel in texture coordinates, per axis
+uniform int u_mode;           // 0 = VR, 1 = MIP, 2 = MinIP
+uniform float u_winLo;        // MIP/MinIP grey window, HU
+uniform float u_winHi;
+uniform float u_bodyHu;       // MinIP: "inside the body" threshold, HU
+uniform float u_bodyRun;      // MinIP: mm above u_bodyHu that count as being inside
 
 out vec4 fragColor;
 
@@ -57,8 +65,44 @@ void main() {
     float tFar = min(min(tmax.x, tmax.y), tmax.z);
     if (tNear > tFar) { fragColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
 
-    vec4 acc = vec4(0.0);
     float t = tNear + u_step * hash(gl_FragCoord.xy);
+    if (u_mode == 1) {
+        float mx = -1e9;
+        for (int i = 0; i < 4096; i++) {
+            // Anything at or above the window top is already white.
+            if (t > tFar || mx >= u_winHi) break;
+            mx = max(mx, texture(u_vol, to + td * t).r);
+            t += u_step;
+        }
+        float g = clamp((mx - u_winLo) / (u_winHi - u_winLo), 0.0, 1.0);
+        fragColor = vec4(vec3(g), 1.0);
+        return;
+    }
+    if (u_mode == 2) {
+        float run = 0.0;
+        bool entered = false;
+        float holes = 1e9;
+        float committed = 1e9;
+        for (int i = 0; i < 4096; i++) {
+            if (t > tFar) break;
+            float hu = texture(u_vol, to + td * t).r;
+            if (hu > u_bodyHu) {
+                run += u_step;
+                if (run >= u_bodyRun) { entered = true; committed = holes; }
+            } else {
+                run = 0.0;
+                if (entered) holes = min(holes, hu);
+            }
+            t += u_step;
+        }
+        if (!entered) { fragColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
+        float v = committed < 1e8 ? committed : u_bodyHu;
+        float g = clamp((v - u_winLo) / (u_winHi - u_winLo), 0.0, 1.0);
+        fragColor = vec4(vec3(g), 1.0);
+        return;
+    }
+
+    vec4 acc = vec4(0.0);
     float tfScale = (u_tfSize - 1.0) / (u_huMax - u_huMin);
     float stepRatio = u_step / u_refStep;
     // Gradients are taken in texture space; d(HU)/d(patient) = Mᵀ · d(HU)/d(tex).

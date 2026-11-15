@@ -6,6 +6,7 @@ import com.tauslop.dicom.MprView
 import com.tauslop.dicom.Rotation
 import com.tauslop.dicom.Vec3
 import com.tauslop.dicom.Window
+import com.tauslop.dicom.vr.VrPlace
 
 /** MPR navigation state: which view is main, the cursor (patient mm) and the plane rotation. */
 data class MprPlace(val main: MprView, val cursor: Vec3, val rotation: Rotation)
@@ -18,6 +19,8 @@ data class Session(
     val window: Window?,
     val presetName: String?,
     val mpr: MprPlace? = null,
+    /** 3D camera, preset/curve, render mode and MIP/MinIP windows. */
+    val vr: VrPlace? = null,
 )
 
 class SessionStore(context: Context) {
@@ -35,6 +38,7 @@ class SessionStore(context: Context) {
             window = window,
             presetName = prefs.getString(KEY_PRESET, null),
             mpr = loadMpr(),
+            vr = VrPlace.decode(prefs.getString(KEY_VR, null)), // malformed → null
         )
     }
 
@@ -71,6 +75,7 @@ class SessionStore(context: Context) {
         } else {
             e.remove(KEY_MAIN).remove(KEY_CURSOR).remove(KEY_ROTATION)
         }
+        if (s.vr != null) e.putString(KEY_VR, s.vr.encode()) else e.remove(KEY_VR)
         e.apply()
     }
 
@@ -86,5 +91,6 @@ class SessionStore(context: Context) {
         const val KEY_MAIN = "mprMain"
         const val KEY_CURSOR = "mprCursor"
         const val KEY_ROTATION = "mprRotation"
+        const val KEY_VR = "vr"
     }
 }

@@ -21,6 +21,8 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -43,6 +45,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.tauslop.dicom.MprView
+import com.tauslop.dicom.vr.RenderMode
 import kotlin.math.roundToInt
 
 /** UI callbacks, bundled so the screen signature stays stable as tools are added. */
@@ -62,6 +65,8 @@ class ViewerActions(
     val onSwap: (MprView) -> Unit,
     val onSwap3D: () -> Unit,
     val onVrPreset: (String) -> Unit,
+    val onVrMode: (RenderMode) -> Unit,
+    val onView3D: (MprView) -> Unit,
     val onToggleShading: () -> Unit,
     val onRotate3D: (Float, Float, Float) -> Unit,
     val onTapImage: (Float, Float) -> Unit,
@@ -70,6 +75,8 @@ class ViewerActions(
 )
 
 private val Accent = Color(0xFF8AB4F8)
+/** Selected render-mode chip, set apart from the preset chips' selection colour. */
+private val ModeSelected = Color(0xFF3C4A5E)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -99,9 +106,24 @@ fun ViewerScreen(state: ViewerState, actions: ViewerActions) {
                 val chipNames = vr?.presets ?: state.presetNames
                 val selected = if (vr != null) vr.presetName else state.presetName
                 val onChip = if (vr != null) actions.onVrPreset else actions.onPreset
-                if (ready && chipNames.isNotEmpty()) {
+                if (ready && chipNames.isNotEmpty()) Row(verticalAlignment = Alignment.CenterVertically) {
+                    // 3D main: VR / MIP / MinIP stay put at the start; the mode's presets scroll.
+                    if (vr != null) {
+                        Row(Modifier.padding(start = 12.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            RenderMode.entries.forEach { m ->
+                                FilterChip(
+                                    selected = vr.mode == m,
+                                    onClick = { actions.onVrMode(m) },
+                                    label = { Text(m.label) },
+                                    colors = FilterChipDefaults.filterChipColors(selectedContainerColor = ModeSelected),
+                                )
+                            }
+                        }
+                        VerticalDivider(Modifier.height(24.dp).padding(start = 8.dp))
+                    }
                     LazyRow(
-                        contentPadding = PaddingValues(horizontal = 12.dp),
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(horizontal = if (vr != null) 8.dp else 12.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         items(chipNames) { name ->
@@ -224,8 +246,8 @@ private fun ToolRow(state: ViewerState, actions: ViewerActions) {
         tools.forEach { t ->
             FilterChip(selected = state.tool == t, onClick = { actions.onTool(t) }, label = { Text(t.label) })
         }
-        // 3D-only, independent of the drag tool: lighting on/off.
-        state.mpr?.takeIf { it.threeDMain }?.let { m ->
+        // 3D volume rendering only, independent of the drag tool: lighting on/off.
+        state.mpr?.takeIf { it.threeDMain && it.vr.mode == RenderMode.VR }?.let { m ->
             FilterChip(selected = m.vr.shading, onClick = actions.onToggleShading, label = { Text("Shading") })
         }
         Spacer(Modifier.weight(1f))

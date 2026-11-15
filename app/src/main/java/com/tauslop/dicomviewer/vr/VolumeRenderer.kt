@@ -10,10 +10,15 @@ import android.opengl.EGLSurface
 import android.opengl.GLES30
 import android.os.SystemClock
 import com.tauslop.dicom.Volume
+import com.tauslop.dicom.Window
 import com.tauslop.dicom.vr.OrbitCamera
+import com.tauslop.dicom.vr.Projection
 import com.tauslop.dicom.vr.RayGeometry
+import com.tauslop.dicom.vr.RenderMode
 import com.tauslop.dicom.vr.TransferFunction
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -35,6 +40,8 @@ class VolumeRenderer {
     private var surface: EGLSurface = EGL14.EGL_NO_SURFACE
     private var program = 0
     private var volTex = 0
+    /** A volume is fully uploaded in [volTex] (GL thread only). */
+    private var hasVolume = false
     private var tfTex = 0
     private var fbo = 0
     private var colorTex = 0
@@ -78,7 +85,8 @@ class VolumeRenderer {
         max3dSize = v[0]
         program = link(Shaders.VERTEX, Shaders.FRAGMENT)
         for (name in listOf("u_vol", "u_tf", "u_texFromPatient", "u_origin00", "u_dOriginX", "u_dOriginY", "u_dir",
-            "u_step", "u_refStep", "u_huMin", "u_huMax", "u_tfSize", "u_stopAlpha", "u_shade", "u_texel")) {
+            "u_step", "u_refStep", "u_huMin", "u_huMax", "u_tfSize", "u_stopAlpha", "u_shade", "u_texel",
+            "u_mode", "u_winLo", "u_winHi", "u_bodyHu", "u_bodyRun")) {
             uniforms[name] = GLES30.glGetUniformLocation(program, name)
         }
         val tex = IntArray(2)
@@ -91,12 +99,13 @@ class VolumeRenderer {
      * progress 0..1. Volumes larger than the GPU limit are reduced by striding.
      */
     suspend fun upload(vol: Volume, onProgress: (Float) -> Unit) = withContext(gl) {
+        check(context != EGL14.EGL_NO_CONTEXT) { "Renderer not initialised" }
         val stride = generateSequence(1) { it * 2 }.first { s ->
             maxOf(vol.nx, vol.ny, vol.nz) / s <= max3dSize || s >= 8
         }
         val nx = vol.nx / stride; val ny = vol.ny / stride; val nz = vol.nz / stride
         // glTexStorage3D storage is immutable: replace the texture for each new volume.
-        GLES30.glDeleteTextures(1, intArrayOf(volTex), 0)
+        deleteVolume()
         val ids = IntArray(1)
         GLES30.glGenTextures(1, ids, 0)
         volTex = ids[0]
@@ -113,6 +122,9 @@ class VolumeRenderer {
         val slope = vol.rescale.slope.toFloat()
         val icpt = vol.rescale.intercept.toFloat()
         for (k in 0 until nz) {
+            // Cancelled (series/folder changed): stop early; the partial texture is freed by the
+            // next deleteVolume (freeVolume, upload or release), and hasVolume stays false.
+            ensureActive()
             sb.clear()
             val kk = k * stride
             for (j in 0 until ny) {
@@ -128,12 +140,19 @@ class VolumeRenderer {
         texFromPatient = RayGeometry.patientToTexture(vol)
         texel = floatArrayOf(1f / nx, 1f / ny, 1f / nz)
         checkGl("upload")
+        hasVolume = true
     }
 
-    /** Renders a [w]×[h] frame of the uploaded volume. */
+    /**
+     * Renders a [w]×[h] frame of the uploaded volume. [mode] VR uses [tf]; MIP/MinIP show the
+     * projected HU through [window].
+     */
     suspend fun render(
         camera: OrbitCamera, tf: TransferFunction, w: Int, h: Int, stepMm: Double, shade: Boolean,
+        mode: RenderMode = RenderMode.VR, window: Window? = null,
     ): Frame = withContext(gl) {
+        // Never sample a freed or half-uploaded texture.
+        check(hasVolume) { "No volume uploaded" }
         val start = SystemClock.elapsedRealtime()
         ensureTarget(w, h)
         if (tf !== lastTf) uploadTf(tf)
@@ -166,6 +185,12 @@ class VolumeRenderer {
         GLES30.glUniform1f(u("u_stopAlpha"), 0.95f)
         GLES30.glUniform1i(u("u_shade"), if (shade) 1 else 0)
         GLES30.glUniform3f(u("u_texel"), texel[0], texel[1], texel[2])
+        val win = window ?: Window(0.0, 1.0)
+        GLES30.glUniform1i(u("u_mode"), mode.ordinal)
+        GLES30.glUniform1f(u("u_winLo"), (win.center - win.width / 2).toFloat())
+        GLES30.glUniform1f(u("u_winHi"), (win.center + win.width / 2).toFloat())
+        GLES30.glUniform1f(u("u_bodyHu"), Projection.BODY_HU.toFloat())
+        GLES30.glUniform1f(u("u_bodyRun"), Projection.BODY_RUN_MM.toFloat())
         GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 0, 3)
 
         val buf = readBuf!!
@@ -178,21 +203,53 @@ class VolumeRenderer {
         Frame(bmp, SystemClock.elapsedRealtime() - start)
     }
 
-    /** Frees GPU resources and the context. */
-    suspend fun release() = withContext(gl) {
+    /**
+     * Frees the volume texture and the render target (the big GPU allocations) but keeps the
+     * context and shaders for the next volume. Safe to call at any time: it runs on the GL thread
+     * after any render or upload already queued, and later renders fail until the next upload.
+     */
+    suspend fun freeVolume() = withContext(gl + NonCancellable) {
         if (context == EGL14.EGL_NO_CONTEXT) return@withContext
-        GLES30.glDeleteTextures(3, intArrayOf(volTex, tfTex, colorTex), 0)
-        if (fbo != 0) GLES30.glDeleteFramebuffers(1, intArrayOf(fbo), 0)
+        deleteVolume()
+        deleteTarget()
+    }
+
+    /** Frees GPU resources and the context. Idempotent. */
+    suspend fun release() = withContext(gl + NonCancellable) {
+        if (context == EGL14.EGL_NO_CONTEXT) return@withContext
+        deleteVolume()
+        deleteTarget()
+        if (tfTex != 0) GLES30.glDeleteTextures(1, intArrayOf(tfTex), 0)
         GLES30.glDeleteProgram(program)
         EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
         EGL14.eglDestroySurface(display, surface)
         EGL14.eglDestroyContext(display, context)
         EGL14.eglTerminate(display)
+        EGL14.eglReleaseThread()
         context = EGL14.EGL_NO_CONTEXT
-        fbo = 0; colorTex = 0; fbW = 0; fbH = 0; lastTf = null
+        surface = EGL14.EGL_NO_SURFACE
+        display = EGL14.EGL_NO_DISPLAY
+        program = 0; tfTex = 0; lastTf = null
+        uniforms.clear()
     }
 
+    /** Stops the GL thread after already-queued work (call after [release]). */
     fun shutdown() = executor.shutdown()
+
+    /** GL thread only. */
+    private fun deleteVolume() {
+        hasVolume = false
+        if (volTex != 0) GLES30.glDeleteTextures(1, intArrayOf(volTex), 0)
+        volTex = 0
+    }
+
+    /** GL thread only. */
+    private fun deleteTarget() {
+        if (colorTex != 0) GLES30.glDeleteTextures(1, intArrayOf(colorTex), 0)
+        if (fbo != 0) GLES30.glDeleteFramebuffers(1, intArrayOf(fbo), 0)
+        fbo = 0; colorTex = 0; fbW = 0; fbH = 0
+        readBuf = null
+    }
 
     private fun u(name: String) = uniforms.getValue(name)
 

@@ -80,6 +80,37 @@ class RealDataTest {
             "oblique 30° ${obl.width}x${obl.height}: ${"%.1f".format(time(obl))} ms (desktop JVM)")
     }
 
+    /**
+     * MinIP from the front over the chest: rays through the lungs must read lung density, not the
+     * air outside the body or the gap above the table; MIP must find bone.
+     */
+    @Test fun lidcProjections() {
+        val ct = scan().series.single()
+        val plan = (VolumeBuilder.plan(ct, Long.MAX_VALUE) as VolumeBuilder.Check.Ok).plan
+        ct.slices.forEachIndexed { k, s ->
+            val f = DicomParser.parse(s.source)
+            plan.put(k, PixelDecoder.decode(f, s.frame), Voi.rescale(f.dataset))
+        }
+        val vol = plan.finish()
+        val cam = com.tauslop.dicom.vr.OrbitCamera.forVolume(vol)
+        val n = 48
+        val minip = ArrayList<Double>()
+        val mip = ArrayList<Double>()
+        for (py in n / 4 until 3 * n / 4) for (px in 0 until n) {
+            val (o, d) = cam.ray(px.toDouble(), py.toDouble(), n, n)
+            com.tauslop.dicom.vr.Projection.project(vol, com.tauslop.dicom.vr.RenderMode.MINIP, o, d, 1.0)?.let(minip::add)
+            com.tauslop.dicom.vr.Projection.project(vol, com.tauslop.dicom.vr.RenderMode.MIP, o, d, 1.0)?.let(mip::add)
+        }
+        val lung = minip.count { it in -1000.0..-700.0 }
+        val air = minip.count { it < -1000.0 }
+        println("MinIP: ${minip.size} in-body rays, $lung lung (-1000..-700), $air below -1000, " +
+            "median ${minip.sorted()[minip.size / 2].toInt()}; MIP max ${mip.max().toInt()}; histogram " +
+            minip.groupingBy { (Math.floorDiv(it.toInt(), 50) * 50) }.eachCount().toSortedMap())
+        assertTrue("too few lung rays: $lung of ${minip.size}", lung > minip.size / 4)
+        assertTrue("air outside body leaked in: $air", air < minip.size / 20)
+        assertTrue("MIP should reach bone", mip.max() > 700)
+    }
+
     @Test fun lidcSlicesDecodeToPlausibleHu() {
         val ct = scan().series.single()
         for (s in ct.slices) {

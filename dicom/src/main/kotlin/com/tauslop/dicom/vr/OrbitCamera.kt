@@ -1,5 +1,6 @@
 package com.tauslop.dicom.vr
 
+import com.tauslop.dicom.MprView
 import com.tauslop.dicom.Rotation
 import com.tauslop.dicom.Vec3
 import com.tauslop.dicom.Volume
@@ -57,6 +58,9 @@ data class OrbitCamera(
 
     fun reset(): OrbitCamera = copy(rotation = Rotation.IDENTITY, zoom = 1.0, panX = 0.0, panY = 0.0)
 
+    /** Quick view: look at the volume the way MPR shows [view] (same screen axes), fitted. */
+    fun facing(view: MprView): OrbitCamera = copy(rotation = rotationFor(view), zoom = 1.0, panX = 0.0, panY = 0.0)
+
     /**
      * Ray through the centre of pixel ([px], [py]) of a [w]×[h] view: origin on the plane through
      * [target] facing the camera, shifted back far enough to start outside the volume (the
@@ -68,6 +72,16 @@ data class OrbitCamera(
         val v = (py + 0.5 - h / 2.0) * s - panY
         val origin = target + right * u - up * v - forward * (fieldMm * 2)
         return origin to forward
+    }
+
+    /**
+     * Screen position of patient point [p] on a [w]×[h] view, in continuous pixel coordinates
+     * (pixel (i, j) spans [i, i+1) × [j, j+1)); the inverse of [ray] at `(u − ½, v − ½)`.
+     */
+    fun project(p: Vec3, w: Int, h: Int): Pair<Double, Double> {
+        val s = mmPerPixel(w, h)
+        val q = p - target
+        return ((q dot right) + panX) / s + w / 2.0 to (-(q dot up) + panY) / s + h / 2.0
     }
 
     companion object {
@@ -83,6 +97,16 @@ data class OrbitCamera(
             // Corner voxel centres are half a voxel inside the box edges; the margin covers it.
             val field = maxOf(extent(cam.right), extent(cam.up)) * 1.02
             return cam.copy(fieldMm = field)
+        }
+
+        /**
+         * Camera rotation whose screen-right/up match MPR [view] (right = view.right,
+         * up = −view.down): coronal from the front, sagittal from the patient's left, axial from
+         * the feet. forward = up × right.
+         */
+        fun rotationFor(view: MprView): Rotation {
+            val up = -view.down
+            return Rotation(view.right, up cross view.right, up)
         }
 
         /** Gram–Schmidt to stop drift after many incremental rotations. */

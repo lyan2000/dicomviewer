@@ -1,7 +1,11 @@
 package com.tauslop.dicomviewer.viewer
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -80,14 +84,15 @@ private fun MainView(state: ViewerState, mpr: MprUi, actions: ViewerActions, siz
             onResetView = actions.onResetView,
             tool = state.tool,
             onWindowDrag = actions.onWindowDrag,
-            lines = if (is3d) emptyList() else mpr.mainLines,
-            onTap = if (is3d) null else actions.onTapImage,
+            lines = mpr.mainLines, // 3D: the shared cursor
+            onTap = actions.onTapImage, // 3D: picks the cursor's depth along the ray
             onTwist = actions.onTwist,
             cameraMode = is3d,
             onRotate = actions.onRotate3D,
         )
         Text(if (is3d) mpr.vr.label else mpr.mainLabel, color = color, style = MaterialTheme.typography.labelMedium,
             modifier = Modifier.align(Alignment.TopStart).padding(6.dp))
+        if (is3d) QuickViews(actions, Modifier.align(Alignment.TopEnd).padding(4.dp))
         if (!is3d && state.sliceCount > 1) {
             SliceScrubber(state.targetIndex, state.sliceCount, actions.onSelectSlice, Modifier.align(Alignment.CenterEnd))
         }
@@ -95,6 +100,26 @@ private fun MainView(state: ViewerState, mpr: MprUi, actions: ViewerActions, siz
 }
 
 private val ThreeDColor = Color(0xFFE0E0E0)
+
+/** 3D main view: buttons that turn the camera to the axial, coronal or sagittal orientation. */
+@Composable
+private fun QuickViews(actions: ViewerActions, modifier: Modifier) {
+    Row(modifier, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        listOf(MprView.AXIAL to "Ax", MprView.CORONAL to "Cor", MprView.SAGITTAL to "Sag").forEach { (v, label) ->
+            Text(
+                label,
+                color = v.color(),
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color(0xB3000000))
+                    .border(1.dp, v.color(), RoundedCornerShape(6.dp))
+                    .clickable { actions.onView3D(v) }
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+            )
+        }
+    }
+}
 
 @Composable
 private fun RowScope.SmallViews(mpr: MprUi, actions: ViewerActions) {
@@ -116,7 +141,7 @@ private fun ThreeDTile(vr: VrUi, actions: ViewerActions, modifier: Modifier) {
             .padding(1.dp),
         contentAlignment = Alignment.Center,
     ) {
-        if (vr.image != null) FittedImage(vr.image, emptyList())
+        if (vr.image != null) FittedImage(vr.image, vr.lines)
         else Text(vr.label, color = Color.Gray, style = MaterialTheme.typography.labelSmall, textAlign = TextAlign.Center,
             modifier = Modifier.padding(4.dp))
         if (vr.image != null) {
