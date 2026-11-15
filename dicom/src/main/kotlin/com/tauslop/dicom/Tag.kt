@@ -13,6 +13,9 @@ object Tag {
     const val StudyDate = 0x00080020
     const val SeriesDate = 0x00080021
     const val StudyTime = 0x00080030
+    const val SeriesTime = 0x00080031
+    const val ContentTime = 0x00080033
+    const val AccessionNumber = 0x00080050
     const val Modality = 0x00080060
     const val Manufacturer = 0x00080070
     const val InstitutionName = 0x00080080
@@ -23,10 +26,14 @@ object Tag {
     const val PatientID = 0x00100020
     const val PatientBirthDate = 0x00100030
     const val PatientSex = 0x00100040
+    const val PatientAge = 0x00101010
 
     const val SliceThickness = 0x00180050
     const val KVP = 0x00180060
     const val SpacingBetweenSlices = 0x00180088
+    const val ExposureTime = 0x00181150
+    const val XRayTubeCurrent = 0x00181151
+    const val Exposure = 0x00181152
 
     const val StudyInstanceUID = 0x0020000D
     const val SeriesInstanceUID = 0x0020000E
@@ -67,10 +74,12 @@ object Tag {
     private val dictionary: Map<Int, VR> = mapOf(
         MediaStorageSOPClassUID to VR.UI, TransferSyntaxUID to VR.UI,
         SpecificCharacterSet to VR.CS, ImageType to VR.CS, SOPClassUID to VR.UI, SOPInstanceUID to VR.UI,
-        StudyDate to VR.DA, SeriesDate to VR.DA, StudyTime to VR.TM, Modality to VR.CS,
+        StudyDate to VR.DA, SeriesDate to VR.DA, StudyTime to VR.TM, SeriesTime to VR.TM, ContentTime to VR.TM,
+        AccessionNumber to VR.SH, Modality to VR.CS,
         Manufacturer to VR.LO, InstitutionName to VR.LO, StudyDescription to VR.LO, SeriesDescription to VR.LO,
-        PatientName to VR.PN, PatientID to VR.LO, PatientBirthDate to VR.DA, PatientSex to VR.CS,
+        PatientName to VR.PN, PatientID to VR.LO, PatientBirthDate to VR.DA, PatientSex to VR.CS, PatientAge to VR.AS,
         SliceThickness to VR.DS, KVP to VR.DS, SpacingBetweenSlices to VR.DS,
+        ExposureTime to VR.IS, XRayTubeCurrent to VR.IS, Exposure to VR.IS,
         StudyInstanceUID to VR.UI, SeriesInstanceUID to VR.UI, StudyID to VR.SH, SeriesNumber to VR.IS,
         AcquisitionNumber to VR.IS, InstanceNumber to VR.IS, ImagePositionPatient to VR.DS,
         ImageOrientationPatient to VR.DS, FrameOfReferenceUID to VR.UI, SliceLocation to VR.DS,

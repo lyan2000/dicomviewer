@@ -111,6 +111,47 @@ class RealDataTest {
         assertTrue("MIP should reach bone", mip.max() > 700)
     }
 
+    /**
+     * Overlay text on anonymised LIDC: report which fields are present, and check that blank or
+     * removed fields leave no empty lines, bare labels or "null"; orientation letters for the axial
+     * stack.
+     */
+    @Test fun lidcOverlayFields() {
+        val ct = scan().series.single()
+        val info = OverlayInfo.from(ct.slices.first().header)
+        val slice = SliceInfo.from(ct.slices.first().header)
+        println("overlay: $info")
+        println("patient=${info.patientLines()} study=${info.studyLines()} series=${info.seriesLine()} slice=${slice.lines()}")
+        val bareLabels = setOf("DOB", "Acc", "Loc", "Thk", "#", "kV", "mAs")
+        for (s in ct.slices) {
+            val o = OverlayInfo.from(s.header)
+            val lines = o.patientLines() + o.studyLines() + listOfNotNull(o.seriesLine()) + SliceInfo.from(s.header).lines()
+            for (l in lines) {
+                assertTrue("blank line in $lines", l.isNotBlank())
+                assertEquals("untrimmed '$l'", l.trim(), l)
+                assertTrue("'null' in '$l'", !l.contains("null"))
+                assertTrue("bare label '$l'", l !in bareLabels)
+                assertTrue("double space in '$l'", !l.contains("  "))
+            }
+            assertEquals("study fields are per study", info.studyLines(), o.studyLines())
+        }
+        assertEquals("CT", info.modality)
+        // Every CT slice has a location and thickness; locations differ by the slice spacing.
+        val locs = ct.slices.map { SliceInfo.from(it.header).location }
+        assertTrue("slice locations present", locs.all { it != null })
+        assertTrue(ct.slices.all { SliceInfo.from(it.header).thickness != null })
+
+        // Axial, standard orientation: R on the left, A on top.
+        val plane = ct.slices.first().plane!!
+        val iop = plane.orientation
+        val right = Vec3(iop[0], iop[1], iop[2])
+        val down = Vec3(iop[3], iop[4], iop[5])
+        assertEquals(Orientation.Edges("R", "A", "L", "P"), Orientation.edges(right, down))
+        val spacing = ct.slices.first().header.doubles(Tag.PixelSpacing)
+        println("pixel spacing ${spacing.toList()}; scale bar on 400 px at 512 px fit: " +
+            "${ScaleBar.choose(spacing[1] * 512 / 1080.0, 400.0)?.label}")
+    }
+
     @Test fun lidcSlicesDecodeToPlausibleHu() {
         val ct = scan().series.single()
         for (s in ct.slices) {
