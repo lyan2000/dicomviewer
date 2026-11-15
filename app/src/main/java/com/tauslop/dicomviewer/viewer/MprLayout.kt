@@ -92,10 +92,15 @@ private fun MainView(state: ViewerState, mpr: MprUi, actions: ViewerActions, siz
         )
         val scrubber = !is3d && state.sliceCount > 1
         // Corner text sits under the scrubber and quick-view buttons (drawn after it) and clear of them.
+        val shown = if (is3d) mpr.vr.image else state.image
         CornerOverlay(
             overlayFor(state),
             endInset = if (scrubber) ScrubberWidth + 4.dp else 0.dp,
             topEndInset = if (is3d) QuickViewsHeight else 0.dp,
+            geom = if (is3d) mpr.vr.geom else mpr.mainGeom,
+            imgW = shown?.width ?: 0,
+            imgH = shown?.height ?: 0,
+            zoom = if (is3d) 1f else state.zoom, // 3D: the camera already zoomed; the frame is drawn fitted
         )
         if (is3d) QuickViews(actions, Modifier.align(Alignment.TopEnd).padding(4.dp))
         if (scrubber) {

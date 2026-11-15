@@ -88,6 +88,8 @@ data class ViewerState(
     val info: OverlayInfo? = null,
     /** Acquisition text of the slice shown in stack mode (corner overlay). */
     val sliceInfo: SliceInfo? = null,
+    /** Screen axes and pixel size of the stack slice in [image] (orientation letters, scale bar). */
+    val stackGeom: ViewGeometry? = null,
 ) {
     enum class Phase { Idle, Scanning, Building, Ready, Error }
 }
@@ -106,6 +108,8 @@ data class MprUi(
     val vr: VrUi,
     /** Shared cursor, patient mm. */
     val cursor: Vec3,
+    /** Screen axes and pixel size of the main MPR image currently shown. */
+    val mainGeom: ViewGeometry? = null,
 )
 
 /**
@@ -126,6 +130,8 @@ data class VrUi(
     val title: String = label,
     /** Time of the last frame, null while uploading or after an error. */
     val millis: Long? = null,
+    /** Camera axes and mm per pixel of [image] (orientation letters, scale bar). */
+    val geom: ViewGeometry? = null,
 )
 
 data class SmallView(val view: MprView, val label: String, val image: ImageBitmap?, val lines: List<RefLine>)
@@ -165,6 +171,8 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
     private val smallImages = HashMap<MprView, ImageBitmap>()
     /** Reference lines matching each view's last rendered image. */
     private val viewLines = HashMap<MprView, List<RefLine>>()
+    /** Geometry matching each view's last rendered image (small images are coarser). */
+    private val viewGeom = HashMap<MprView, ViewGeometry>()
     /** True while the user is actively interacting (see [markInteracting]). */
     private var fast = false
     private var idleJob: Job? = null
@@ -397,6 +405,7 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         current = null
         mpr = null
         smallImages.clear()
+        viewGeom.clear()
         viewLines.clear()
         dropVolume()
         if (vrPlace != null) { applyVrSettings(vrPlace); pendingVr = vrPlace }
@@ -652,9 +661,11 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
             mainRescale = vol.rescale
             smallImages[r.main] = bmp
             viewLines[r.main] = refLines(r.main, mainPlane, r)
+            viewGeom[r.main] = ViewGeometry.of(mainPlane)
             for ((v, img) in smallResults) {
                 smallImages[v] = img
                 viewLines[v] = refLines(v, smallPlanes.getValue(v), r)
+                viewGeom[v] = ViewGeometry.of(smallPlanes.getValue(v))
             }
             val d = Reslicer.depth(vol, r.rotation.apply(r.main.scroll), r.cursor)
             _state.update { it.copy(image = bmp, sliceIndex = d.index, sliceCount = d.count, error = null, mpr = mprUi(m)) }
@@ -675,17 +686,18 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         threeDMain = threeDMain,
         vr = vrUi(),
         cursor = m.cursor,
+        mainGeom = viewGeom[m.main],
     )
 
     private fun vrUi(): VrUi {
         val title = if (vrMillis != null) vrLabel else vrStatus
         return if (vrMode == RenderMode.VR) {
             VrUi(vrImage, vrStatus, presetName = if (vrAdjusted) null else vrPreset.name, shading = vrShade,
-                lines = vrCursorLines(), title = title, millis = vrMillis)
+                lines = vrCursorLines(), title = title, millis = vrMillis, geom = vrGeom())
         } else {
             VrUi(vrImage, vrStatus, mode = vrMode, presets = Projection.presets(vrMode).map { it.label!! },
                 presetName = projWindow.getValue(vrMode).label, shading = vrShade, lines = vrCursorLines(),
-                title = title, millis = vrMillis)
+                title = title, millis = vrMillis, geom = vrGeom())
         }
     }
 
@@ -910,6 +922,11 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Screen axes and mm per pixel of the shown 3D frame (zoom is already in the camera). */
+    private fun vrGeom(): ViewGeometry? = vrShownCam?.let { cam ->
+        ViewGeometry(cam.right, -cam.up, cam.mmPerPixel(vrShownW, vrShownH))
+    }
+
     /**
      * The shared cursor on the shown 3D frame, drawn like MPR reference lines: for each plane, the
      * line where it cuts the screen-facing plane through the cursor (so the coronal 3D view
@@ -990,6 +1007,7 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
             mainRescale = loaded.rescale
             _state.update {
                 it.copy(sliceIndex = r.index, image = bmp.asImageBitmap(), sliceInfo = SliceInfo.from(slice.header),
+                    stackGeom = slice.plane?.let(ViewGeometry::of),
                     window = it.window ?: window,
                     presetName = if (it.window == null) name else it.presetName, error = null)
             }

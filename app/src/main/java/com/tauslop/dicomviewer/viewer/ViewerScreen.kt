@@ -198,7 +198,8 @@ fun ViewerScreen(state: ViewerState, actions: ViewerActions) {
                         )
                         // Corner text, including the "MPR unavailable" / skipped-files notes (bottom left).
                         // The scrubber is beside this box, so no inset is needed.
-                        CornerOverlay(overlayFor(state))
+                        CornerOverlay(overlayFor(state), geom = state.stackGeom,
+                            imgW = state.image?.width ?: 0, imgH = state.image?.height ?: 0, zoom = state.zoom)
                         state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                     }
                     if (state.sliceCount > 1) {
