@@ -20,6 +20,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.VerticalDivider
@@ -45,6 +48,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.tauslop.dicom.MprView
+import com.tauslop.dicomviewer.data.DisplayPrefs
 import com.tauslop.dicom.vr.RenderMode
 
 /** UI callbacks, bundled so the screen signature stays stable as tools are added. */
@@ -66,6 +70,10 @@ class ViewerActions(
     val onVrPreset: (String) -> Unit,
     val onVrMode: (RenderMode) -> Unit,
     val onView3D: (MprView) -> Unit,
+    val onProbe: (Float, Float) -> Unit,
+    val onProbeEnd: () -> Unit,
+    val onToggleOverlay: () -> Unit,
+    val onToggleHidePatient: () -> Unit,
     val onToggleShading: () -> Unit,
     val onRotate3D: (Float, Float, Float) -> Unit,
     val onTapImage: (Float, Float) -> Unit,
@@ -98,6 +106,7 @@ fun ViewerScreen(state: ViewerState, actions: ViewerActions) {
                         }
                         if (state.series.size > 1) TextButton(onClick = { pickerOpen = true }) { Text("Series") }
                         TextButton(onClick = actions.onOpenFolder) { Text("Open") }
+                        DisplayMenu(state.display, actions)
                     },
                 )
                 // With 3D in the main view the chips select 3D presets; otherwise MPR/stack windows.
@@ -195,11 +204,16 @@ fun ViewerScreen(state: ViewerState, actions: ViewerActions) {
                             onResetView = actions.onResetView,
                             tool = state.tool,
                             onWindowDrag = actions.onWindowDrag,
+                            onProbe = actions.onProbe,
+                            onProbeEnd = actions.onProbeEnd,
+                            probe = state.probe?.let { Offset(it.u, it.v) },
                         )
                         // Corner text, including the "MPR unavailable" / skipped-files notes (bottom left).
                         // The scrubber is beside this box, so no inset is needed.
-                        CornerOverlay(overlayFor(state), geom = state.stackGeom,
-                            imgW = state.image?.width ?: 0, imgH = state.image?.height ?: 0, zoom = state.zoom)
+                        if (state.display.showOverlay) {
+                            CornerOverlay(overlayFor(state), geom = state.stackGeom,
+                                imgW = state.image?.width ?: 0, imgH = state.image?.height ?: 0, zoom = state.zoom)
+                        }
                         state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                     }
                     if (state.sliceCount > 1) {
@@ -261,6 +275,27 @@ private fun toolHint(t: Tool): String = when (t) {
     Tool.ZOOM -> "drag ↑ in, ↓ out"
     Tool.WL -> "↔ width, ↕ level"
     Tool.OBLIQUE -> "drag around ✛ to tilt"
+}
+
+/** "⋮" menu in the app bar: overlay on/off and hide patient details (both remembered across launches). */
+@Composable
+private fun DisplayMenu(d: DisplayPrefs, actions: ViewerActions) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        TextButton(onClick = { open = true }) { Text("⋮") }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            DropdownMenuItem(
+                text = { Text("Show overlay") },
+                onClick = { actions.onToggleOverlay() },
+                trailingIcon = { Checkbox(checked = d.showOverlay, onCheckedChange = null) },
+            )
+            DropdownMenuItem(
+                text = { Text("Hide patient details") },
+                onClick = { actions.onToggleHidePatient() },
+                trailingIcon = { Checkbox(checked = d.hidePatient, onCheckedChange = null) },
+            )
+        }
+    }
 }
 
 /** App bar title: the app name until an image is shown; then the corner overlay carries the status. */

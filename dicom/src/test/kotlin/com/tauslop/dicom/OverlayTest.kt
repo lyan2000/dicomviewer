@@ -136,6 +136,21 @@ class OverlayTest {
         assertEquals("#7", p.seriesLine())
     }
 
+    @Test fun withoutPatientBlanksEveryPatientField() {
+        val full = OverlayInfo(
+            patientName = "Doe Jane", patientId = "12345", sex = "F", age = "52Y", birthDate = "1952-03-01",
+            institution = "General Hospital", studyDate = "2004-06-15", studyTime = "09:30:00",
+            studyDescription = "CT CHEST", accession = "A77", modality = "CT", seriesNumber = 3, seriesDescription = "Lung",
+        )
+        val hidden = full.withoutPatient()
+        assertTrue(hidden.patientLines().isEmpty())
+        assertEquals(listOf("General Hospital", "2004-06-15 09:30:00", "CT CHEST"), hidden.studyLines())
+        assertEquals("#3 Lung", hidden.seriesLine())
+        // No line anywhere still contains a patient value.
+        val all = (hidden.patientLines() + hidden.studyLines() + listOfNotNull(hidden.seriesLine())).joinToString("|")
+        for (v in listOf("Doe", "12345", "52Y", "1952", "A77")) assertTrue("'$v' leaked: $all", v !in all)
+    }
+
     @Test fun ageFromBirthDateWhenPatientAgeMissing() {
         val h = header {
             str(Tag.PatientBirthDate, VR.DA, "19600615")

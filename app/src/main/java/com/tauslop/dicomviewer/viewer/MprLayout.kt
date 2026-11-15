@@ -28,11 +28,13 @@ import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.tauslop.dicom.MprView
+import com.tauslop.dicom.vr.RenderMode
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -89,11 +91,14 @@ private fun MainView(state: ViewerState, mpr: MprUi, actions: ViewerActions, siz
             onTwist = actions.onTwist,
             cameraMode = is3d,
             onRotate = actions.onRotate3D,
+            onProbe = actions.onProbe, // 2D only (ignored in camera mode)
+            onProbeEnd = actions.onProbeEnd,
+            probe = if (is3d) null else state.probe?.let { Offset(it.u, it.v) },
         )
         val scrubber = !is3d && state.sliceCount > 1
         // Corner text sits under the scrubber and quick-view buttons (drawn after it) and clear of them.
         val shown = if (is3d) mpr.vr.image else state.image
-        CornerOverlay(
+        if (state.display.showOverlay) CornerOverlay(
             overlayFor(state),
             endInset = if (scrubber) ScrubberWidth + 4.dp else 0.dp,
             topEndInset = if (is3d) QuickViewsHeight else 0.dp,
@@ -158,7 +163,9 @@ private fun ThreeDTile(vr: VrUi, actions: ViewerActions, modifier: Modifier) {
         else Text(vr.label, color = Color.Gray, style = MaterialTheme.typography.labelSmall, textAlign = TextAlign.Center,
             modifier = Modifier.padding(4.dp))
         if (vr.image != null) {
-            Text(vr.label, color = ThreeDColor, style = MaterialTheme.typography.labelSmall,
+            // Small tiles carry only their name: "3D", "MIP" or "MinIP" (preset and timing are in the main overlay).
+            Text(if (vr.mode == RenderMode.VR) "3D" else vr.mode.label, color = ThreeDColor,
+                style = MaterialTheme.typography.labelSmall, maxLines = 1,
                 modifier = Modifier.align(Alignment.TopStart).padding(4.dp))
         }
     }
@@ -170,7 +177,9 @@ private fun SmallTile(v: SmallView, actions: ViewerActions, modifier: Modifier) 
         modifier.padding(2.dp).border(1.dp, v.view.color()).clickable { actions.onSwap(v.view) }.padding(1.dp),
     ) {
         v.image?.let { FittedImage(it, v.lines) }
+        // Plane name and slice number only; long oblique names end in an ellipsis.
         Text(v.label, color = v.view.color(), style = MaterialTheme.typography.labelSmall,
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.align(Alignment.TopStart).padding(4.dp))
     }
 }

@@ -83,6 +83,17 @@ object RayGeometry {
     }
 
     /**
+     * Modality value (HU for CT) at patient point [p], trilinear; null outside the volume's box
+     * (half a voxel beyond the edge voxel centres, like the texture).
+     */
+    fun huAt(vol: Volume, p: Vec3): Double? {
+        val t = applyPoint(patientToTexture(vol), p)
+        val eps = 1e-6 // float matrix: points exactly on a face may land a hair outside
+        if (listOf(t.x, t.y, t.z).any { it < -eps || it > 1 + eps || it.isNaN() }) return null
+        return sampleHu(vol, t)
+    }
+
+    /**
      * CPU reference of the shader's front-to-back compositing (no shading). Returns premultiplied
      * RGBA. Stops when opacity exceeds [stopAlpha].
      */

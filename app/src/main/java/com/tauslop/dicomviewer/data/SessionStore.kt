@@ -2,6 +2,7 @@ package com.tauslop.dicomviewer.data
 
 import android.content.Context
 import android.net.Uri
+import androidx.core.content.edit
 import com.tauslop.dicom.MprView
 import com.tauslop.dicom.Rotation
 import com.tauslop.dicom.Vec3
@@ -22,6 +23,9 @@ data class Session(
     /** 3D camera, preset/curve, render mode and MIP/MinIP windows. */
     val vr: VrPlace? = null,
 )
+
+/** Corner overlay on/off, and whether patient-identifying text is hidden (shown by default). */
+data class DisplayPrefs(val showOverlay: Boolean = true, val hidePatient: Boolean = false)
 
 class SessionStore(context: Context) {
     private val prefs = context.getSharedPreferences("session", Context.MODE_PRIVATE)
@@ -79,9 +83,26 @@ class SessionStore(context: Context) {
         e.apply()
     }
 
-    fun clear() = prefs.edit().clear().apply()
+    /** Forgets the folder and where the user was; display preferences are kept. */
+    fun clear() = prefs.edit {
+        prefs.all.keys.filter { it !in DISPLAY_KEYS }.forEach { remove(it) }
+    }
+
+    /** Overlay toggles; stored with the session but independent of the folder (they survive [clear]). */
+    fun loadDisplay() = DisplayPrefs(
+        showOverlay = prefs.getBoolean(KEY_OVERLAY, true),
+        hidePatient = prefs.getBoolean(KEY_HIDE_PATIENT, false),
+    )
+
+    fun saveDisplay(d: DisplayPrefs) = prefs.edit {
+        putBoolean(KEY_OVERLAY, d.showOverlay)
+        putBoolean(KEY_HIDE_PATIENT, d.hidePatient)
+    }
 
     private companion object {
+        const val KEY_OVERLAY = "showOverlay"
+        const val KEY_HIDE_PATIENT = "hidePatient"
+        val DISPLAY_KEYS = setOf(KEY_OVERLAY, KEY_HIDE_PATIENT)
         const val KEY_TREE = "tree"
         const val KEY_SERIES = "series"
         const val KEY_SLICE = "slice"

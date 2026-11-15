@@ -138,6 +138,13 @@ data class OverlayInfo(
         accession?.let { "Acc $it" },
     )
 
+    /**
+     * The same info with every patient-identifying field removed (name, ID, sex, age, birth date
+     * and the accession number), for the "hide patient details" toggle. Study and series text stay.
+     */
+    fun withoutPatient(): OverlayInfo =
+        copy(patientName = null, patientId = null, sex = null, age = null, birthDate = null, accession = null)
+
     /** Series heading for the bottom-left corner: "#3 CHEST", "#3", "CHEST", or null. */
     fun seriesLine(): String? =
         listOfNotNull(seriesNumber?.let { "#$it" }, seriesDescription).joinToString(" ").ifEmpty { null }

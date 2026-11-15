@@ -15,7 +15,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.unit.IntOffset
@@ -62,6 +64,11 @@ fun ImageCanvas(
      */
     cameraMode: Boolean = false,
     onRotate: (dx: Float, dy: Float, viewPx: Float) -> Unit = { _, _, _ -> },
+    /** Press-and-hold, in image pixel coordinates (value probe); [onProbeEnd] when the finger lifts. */
+    onProbe: ((u: Float, v: Float) -> Unit)? = null,
+    onProbeEnd: () -> Unit = {},
+    /** Where the probe is, in image pixel coordinates: a small ring is drawn there. */
+    probe: Offset? = null,
 ) {
     val camMode by rememberUpdatedState(cameraMode)
     val rotate by rememberUpdatedState(onRotate)
@@ -75,6 +82,8 @@ fun ImageCanvas(
     val transform by rememberUpdatedState(onTransform)
     val windowDrag by rememberUpdatedState(onWindowDrag)
     val twist by rememberUpdatedState(onTwist)
+    val probeCb by rememberUpdatedState(onProbe)
+    val probeEnd by rememberUpdatedState(onProbeEnd)
 
     /** Fit scale × zoom, and the screen position of the image's top-left pixel. */
     fun layout(viewW: Float, viewH: Float, img: ImageBitmap): Pair<Float, Offset> {
@@ -90,6 +99,18 @@ fun ImageCanvas(
             .pointerInput(Unit) {
                 detectTapGestures(
                     onDoubleTap = { onResetView() },
+                    // The probe shows while held and goes away on release (or if the press is cancelled).
+                    onPress = {
+                        tryAwaitRelease()
+                        probeEnd()
+                    },
+                    onLongPress = { pos ->
+                        val img = currentImage ?: return@detectTapGestures
+                        val cb = probeCb ?: return@detectTapGestures
+                        if (camMode) return@detectTapGestures
+                        val (fit, topLeft) = layout(size.width.toFloat(), size.height.toFloat(), img)
+                        cb((pos.x - topLeft.x) / fit, (pos.y - topLeft.y) / fit)
+                    },
                     onTap = { pos ->
                         val img = currentImage ?: return@detectTapGestures
                         val cb = tap ?: return@detectTapGestures
@@ -188,6 +209,11 @@ fun ImageCanvas(
         )
         if (lines.isNotEmpty()) {
             drawRefLines(lines, img.width, img.height, topLeft, fit, strokePx = 1.5.dp.toPx(), gapPx = 14.dp.toPx())
+        }
+        probe?.let { p ->
+            val c = topLeft + Offset(p.x * fit, p.y * fit)
+            drawCircle(Color.Black.copy(alpha = 0.7f), radius = 7.dp.toPx(), center = c, style = Stroke(3.dp.toPx()))
+            drawCircle(Color(0xFF8AB4F8), radius = 7.dp.toPx(), center = c, style = Stroke(1.5.dp.toPx()))
         }
     }
 }

@@ -25,6 +25,7 @@ import com.tauslop.dicomviewer.data.LoadedSlice
 import com.tauslop.dicomviewer.data.MprPlace
 import com.tauslop.dicomviewer.data.Session
 import com.tauslop.dicomviewer.data.SessionStore
+import com.tauslop.dicomviewer.data.DisplayPrefs
 import com.tauslop.dicomviewer.data.SliceCache
 import com.tauslop.dicomviewer.io.FolderScanner
 import com.tauslop.dicomviewer.mpr.MprSession
@@ -32,6 +33,7 @@ import com.tauslop.dicomviewer.render.FrameRenderer
 import com.tauslop.dicomviewer.vr.VolumeRenderer
 import com.tauslop.dicom.vr.OrbitCamera
 import com.tauslop.dicom.vr.Projection
+import com.tauslop.dicom.vr.RayGeometry
 import com.tauslop.dicom.vr.RenderMode
 import com.tauslop.dicom.vr.TransferFunction
 import com.tauslop.dicom.vr.VrPlace
@@ -90,6 +92,10 @@ data class ViewerState(
     val sliceInfo: SliceInfo? = null,
     /** Screen axes and pixel size of the stack slice in [image] (orientation letters, scale bar). */
     val stackGeom: ViewGeometry? = null,
+    /** Overlay on/off and hide-patient-details. */
+    val display: DisplayPrefs = DisplayPrefs(),
+    /** Press-and-hold value probe on the 2D main image, while the finger is down. */
+    val probe: Probe? = null,
 ) {
     enum class Phase { Idle, Scanning, Building, Ready, Error }
 }
@@ -110,7 +116,12 @@ data class MprUi(
     val cursor: Vec3,
     /** Screen axes and pixel size of the main MPR image currently shown. */
     val mainGeom: ViewGeometry? = null,
+    /** Value (HU for CT) at the cursor, from the volume; null if the cursor is outside it. */
+    val cursorValue: Double? = null,
 )
+
+/** Probe at image pixel ([u], [v]) of the main image (continuous coordinates), reading [value]. */
+data class Probe(val u: Float, val v: Float, val value: Double)
 
 /**
  * 3D view: latest rendered image, a status label (preset or window, render time, or progress),
@@ -240,6 +251,8 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
     private val sessions = SessionStore(app)
     private var tree: Uri? = null
     private var viewSize = IntSize.Zero
+    /** Overlay toggles (persisted on change; kept across folders). */
+    private var display = sessions.loadDisplay()
 
     init {
         viewModelScope.launch {
@@ -254,6 +267,7 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             vrRequest.filterNotNull().collect { renderVr(it) }
         }
+        _state.update { it.copy(display = display) }
         restoreSession()
     }
 
@@ -285,7 +299,7 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         series = emptyList()
         cache.clear()
         this.tree = tree
-        _state.value = ViewerState(phase = ViewerState.Phase.Scanning)
+        _state.value = ViewerState(phase = ViewerState.Phase.Scanning, display = display)
         scanJob = viewModelScope.launch {
             try {
                 val result = scanner.scan(tree) { done, total ->
@@ -322,7 +336,7 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         mpr = null
         dropVolume()
         tree = null
-        _state.value = ViewerState(notice = "Cancelled.")
+        _state.value = ViewerState(notice = "Cancelled.", display = display)
     }
 
     /** Persist folder, series, slice and window (called when the app goes to the background). */
@@ -681,12 +695,17 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
         mainLines = if (threeDMain) vrCursorLines() else viewLines[m.main].orEmpty(),
         // With 3D in the main square, all three planes go in the small row.
         small = (if (threeDMain) MprView.entries else m.smallViews)
-            .map { SmallView(it, m.label(it), smallImages[it], viewLines[it].orEmpty()) },
+            .map { v ->
+                // Small tiles: plane name and slice number only.
+                val d = m.depth(v)
+                SmallView(v, "${m.label(v)} ${d.index + 1}/${d.count}", smallImages[v], viewLines[v].orEmpty())
+            },
         oblique = !m.rotation.isIdentity,
         threeDMain = threeDMain,
         vr = vrUi(),
         cursor = m.cursor,
         mainGeom = viewGeom[m.main],
+        cursorValue = RayGeometry.huAt(m.volume, m.cursor),
     )
 
     private fun vrUi(): VrUi {
@@ -969,6 +988,37 @@ class ViewerViewModel(app: Application) : AndroidViewModel(app) {
             requestMpr()
             publishMpr()
         }
+    }
+
+    // ---- overlay toggles and probe -----------------------------------------
+
+    fun toggleOverlay() = setDisplay(display.copy(showOverlay = !display.showOverlay))
+
+    fun toggleHidePatient() = setDisplay(display.copy(hidePatient = !display.hidePatient))
+
+    private fun setDisplay(d: DisplayPrefs) {
+        display = d
+        sessions.saveDisplay(d) // saved right away, so it survives even without a folder open
+        _state.update { it.copy(display = d) }
+    }
+
+    /**
+     * Press-and-hold on the 2D main image at ([u], [v]) (continuous image pixels): read the shown
+     * frame's value there (HU for CT). Ignored for 3D, colour images and outside the image.
+     */
+    fun probeAt(u: Float, v: Float) {
+        if (threeDMain) return
+        val f = mainFrame ?: return
+        val r = mainRescale ?: return
+        if (f.gray == null || u < 0 || v < 0) return
+        val i = u.toInt()
+        val j = v.toInt()
+        if (i >= f.width || j >= f.height) return
+        _state.update { it.copy(probe = Probe(u, v, r.apply(f.stored(j * f.width + i)))) }
+    }
+
+    fun endProbe() {
+        if (_state.value.probe != null) _state.update { it.copy(probe = null) }
     }
 
     /** Single tap on the main image at pixel ([u], [v]): move the cursor there (depth unchanged; 3D: picked depth). */

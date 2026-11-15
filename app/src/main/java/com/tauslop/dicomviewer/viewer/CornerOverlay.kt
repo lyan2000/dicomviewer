@@ -12,7 +12,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.offset
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.text.font.FontWeight
 import com.tauslop.dicom.ImagePlane
 import com.tauslop.dicom.Orientation
@@ -46,6 +53,7 @@ data class OverlayUi(
 )
 
 private val NoteColor = Color(0xFF9E9E9E)
+private val ProbeColor = Color(0xFF8AB4F8)
 private val ThreeDText = Color(0xFFE0E0E0)
 
 /**
@@ -58,7 +66,10 @@ private val ThreeDText = Color(0xFFE0E0E0)
  */
 fun overlayFor(state: ViewerState): OverlayUi {
     fun lines(xs: List<String>) = xs.map { OverlayLine(it) }
-    val info = state.info
+    // Hide patient details: every patient-identifying field (and the accession number) goes.
+    val info = state.info?.let { if (state.display.hidePatient) it.withoutPatient() else it }
+    val unit = if (info?.modality == "CT") "HU" else ""
+    fun value(label: String, v: Double) = "$label ${DicomFormat.number(v, 0)} $unit".trim()
     val bl = mutableListOf<OverlayLine>()
     val br = mutableListOf<OverlayLine>()
     info?.seriesLine()?.let { bl += OverlayLine(it) }
@@ -67,12 +78,14 @@ fun overlayFor(state: ViewerState): OverlayUi {
     when {
         m != null && m.threeDMain -> {
             bl += OverlayLine(m.vr.title, ThreeDText)
+            m.cursorValue?.let { bl += OverlayLine(value("Cursor", it)) }
             m.vr.millis?.let { br += OverlayLine("$it ms") }
         }
         m != null -> {
             if (n > 0) bl += OverlayLine("${m.mainLabel} ${state.sliceIndex + 1}/$n", m.main.color())
             val c = m.cursor
             bl += OverlayLine("Pos ${listOf(c.x, c.y, c.z).joinToString(", ") { DicomFormat.number(it) ?: "?" }} mm")
+            m.cursorValue?.let { bl += OverlayLine(value("Cursor", it)) }
             br += windowLines(state)
         }
         else -> {
@@ -82,6 +95,8 @@ fun overlayFor(state: ViewerState): OverlayUi {
             listOfNotNull(state.stackReason, state.skippedNote).forEach { bl += OverlayLine(it, NoteColor, wrap = true) }
         }
     }
+    // Press-and-hold probe (stack and 2D MPR), highlighted while the finger is down.
+    state.probe?.let { br.add(0, OverlayLine(value("Probe", it.value), ProbeColor)) }
     br += OverlayLine("Zoom ${(state.zoom * 100).roundToInt()}%")
     return OverlayUi(
         topLeft = lines(info?.patientLines().orEmpty()),
@@ -155,21 +170,52 @@ fun CornerOverlay(
                 val maxBarPx = with(density) { (rightMax - ScaleLabelWidth).coerceAtLeast(24.dp).toPx() }
                 ScaleBar.choose(mm / screenPerImg, maxBarPx.toDouble())
             }
-            Corner(ui.topLeft, Alignment.TopStart, Modifier.widthIn(max = leftMax))
+            // Corner heights (px), measured, so the side letters can sit in the gap between them.
+            var tlH by remember { mutableIntStateOf(0) }
+            var trH by remember { mutableIntStateOf(0) }
+            var blH by remember { mutableIntStateOf(0) }
+            var brH by remember { mutableIntStateOf(0) }
+            Corner(ui.topLeft, Alignment.TopStart, Modifier.widthIn(max = leftMax).onSizeChanged { tlH = it.height })
             Corner(ui.topRight, Alignment.TopEnd,
-                Modifier.padding(end = endInset, top = topEndInset).widthIn(max = rightMax))
-            Corner(ui.bottomLeft, Alignment.BottomStart, Modifier.widthIn(max = leftMax))
-            Corner(ui.bottomRight, Alignment.BottomEnd, Modifier.padding(end = endInset).widthIn(max = rightMax),
+                Modifier.padding(end = endInset, top = topEndInset).widthIn(max = rightMax).onSizeChanged { trH = it.height })
+            Corner(ui.bottomLeft, Alignment.BottomStart, Modifier.widthIn(max = leftMax).onSizeChanged { blH = it.height })
+            Corner(ui.bottomRight, Alignment.BottomEnd,
+                Modifier.padding(end = endInset).widthIn(max = rightMax).onSizeChanged { brH = it.height },
                 header = bar?.let { { ScaleBarRow(it) } })
             geom?.let { g ->
                 val e = Orientation.edges(g.right, g.down)
-                Letter(e.left, Modifier.align(Alignment.CenterStart))
-                Letter(e.right, Modifier.align(Alignment.CenterEnd).padding(end = endInset))
+                val innerH = with(density) { boxH - 12.dp.toPx() }
+                val letterH = with(density) { LetterHeight.toPx() }
+                val topInsetPx = with(density) { topEndInset.toPx() }
+                // An empty corner is not composed, so its last measured height must not count.
+                val left = sideLetterY(if (ui.topLeft.isEmpty()) 0 else tlH, if (ui.bottomLeft.isEmpty()) 0 else blH, innerH, letterH)
+                val right = sideLetterY(
+                    if (ui.topRight.isEmpty()) topInsetPx.roundToInt() else trH + topInsetPx.roundToInt(),
+                    if (ui.bottomRight.isEmpty() && bar == null) 0 else brH, innerH, letterH)
+                left?.let { y -> Letter(e.left, Modifier.align(Alignment.TopStart).offset { IntOffset(0, y) }) }
+                right?.let { y ->
+                    Letter(e.right, Modifier.align(Alignment.TopEnd).padding(end = endInset).offset { IntOffset(0, y) })
+                }
                 Letter(e.top, Modifier.align(Alignment.TopCenter).padding(top = topEndInset))
                 Letter(e.bottom, Modifier.align(Alignment.BottomCenter))
             }
         }
     }
+}
+
+/** Space one side letter needs vertically (labelMedium line). */
+private val LetterHeight = 18.dp
+
+/**
+ * Top offset (px) for a side letter: centred in the free gap between the top corner (height
+ * [topPx]) and the bottom corner ([bottomPx]) of an [innerPx]-tall area, or null (hidden) when the
+ * gap is shorter than the letter.
+ */
+private fun sideLetterY(topPx: Int, bottomPx: Int, innerPx: Float, letterPx: Float): Int? {
+    val gapTop = topPx.toFloat()
+    val gapBottom = innerPx - bottomPx
+    if (gapBottom - gapTop < letterPx) return null
+    return ((gapTop + gapBottom) / 2 - letterPx / 2).roundToInt()
 }
 
 /** Width reserved next to the bar for its label ("10 cm"). */

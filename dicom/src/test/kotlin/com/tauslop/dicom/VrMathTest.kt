@@ -112,6 +112,15 @@ class VrMathTest {
         assertVec(Vec3(3.5 / 4, 2.5 / 3, 4.5 / 5), RayGeometry.applyPoint(m, vol.toPatient(3.0, 2.0, 4.0)), 1e-6)
     }
 
+    @Test fun huAtPatientPoint() {
+        val vol = volume(8) { i, _, _ -> i * 10 } // HU rises by 10 per voxel along +x
+        assertEquals(30.0, RayGeometry.huAt(vol, vol.toPatient(3.0, 4.0, 5.0))!!, 1e-4)
+        assertEquals(35.0, RayGeometry.huAt(vol, vol.toPatient(3.5, 4.0, 5.0))!!, 1e-4) // trilinear
+        assertEquals(70.0, RayGeometry.huAt(vol, vol.toPatient(7.4, 0.0, 7.0))!!, 1e-4) // edge half-voxel clamps
+        assertNull(RayGeometry.huAt(vol, vol.toPatient(7.6, 0.0, 0.0)))  // outside the box
+        assertNull(RayGeometry.huAt(vol, vol.toPatient(0.0, -0.6, 0.0)))
+    }
+
     @Test fun boxIntersection() {
         val hit = RayGeometry.intersectBox(Vec3(-1.0, 0.5, 0.5), Vec3(1.0, 0.0, 0.0))!!
         assertEquals(1.0, hit.first, 1e-12); assertEquals(2.0, hit.second, 1e-12)
